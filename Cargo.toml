@@ -1,0 +1,27 @@
+[package]
+edition = "2018"
+name = "ton-consumer"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+log = "*"
+serde = "1"
+
+[dependencies.rdkafka]
+features = ["sasl"]
+version = "0.26"
+
+[dependencies.tokio]
+features = ["sync", "fs", "rt-multi-thread", "macros"]
+version = "1"
+
+[dependencies.ton-block-compressor]
+git = "ssh://git@gitlab.dexpa.io/beton/ton-block-compressor.git"
+
+[dependencies.ton_block]
+git = "https://github.com/broxus/ton-labs-block"
+
+[dependencies.ton_types]
+git = "https://github.com/broxus/ton-labs-types"
