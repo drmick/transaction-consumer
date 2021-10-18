@@ -113,7 +113,7 @@ impl BlockProducer {
                     return;
                 }
                 if let Err(e) = rx.await {
-                    log: warn!("Committer is dropped: {}", e);
+                    log::warn!("Committer is dropped: {}", e);
                     continue;
                 } //waiting for commit
                 if let Err(e) = this.consumer.commit_consumer_state(CommitMode::Async) {
