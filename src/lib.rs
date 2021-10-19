@@ -46,7 +46,7 @@ pub struct ProducedBlock {
 }
 
 impl ProducedBlock {
-    fn new(id: UInt256, block: ton_block::Block) -> (Self, oneshot::Receiver<()>) {
+    pub fn new(id: UInt256, block: ton_block::Block) -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
         (
             Self {
@@ -90,7 +90,7 @@ impl BlockProducer {
         self.consumer.subscribe(&[&self.topic])?;
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
-        let this = self.clone();
+        let this = self;
         tokio::spawn(async move {
             let mut decompressor = ZstdWrapper::new();
             while let Ok(a) = this.consumer.recv().await {
@@ -100,7 +100,7 @@ impl BlockProducer {
                     "Failed decompressing block data"
                 );
                 let block = try_res!(
-                    ton_block::Block::construct_from_bytes(&payload_decompressed),
+                    ton_block::Block::construct_from_bytes(payload_decompressed),
                     "Failed constructing block"
                 );
 
