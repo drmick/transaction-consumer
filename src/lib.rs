@@ -46,7 +46,7 @@ pub struct ProducedBlock {
 }
 
 impl ProducedBlock {
-    pub fn new(id: UInt256, block: ton_block::Block) -> (Self, oneshot::Receiver<()>) {
+    fn new(id: UInt256, block: ton_block::Block) -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
         (
             Self {
