@@ -40,8 +40,8 @@ macro_rules! try_opt {
 }
 
 pub struct ProducedBlock {
-    id: UInt256,
-    block: ton_block::Block,
+    pub id: UInt256,
+    pub block: ton_block::Block,
     commit_channel: Option<oneshot::Sender<()>>,
 }
 
@@ -65,12 +65,12 @@ impl ProducedBlock {
         Ok(())
     }
 
-    pub fn inner(&mut self) -> (UInt256, ton_block::Block) {
-        (
-            std::mem::take(&mut self.id),
-            std::mem::take(&mut self.block),
-        )
-    }
+    // pub fn inner(&mut self) -> (UInt256, ton_block::Block) {
+    //     (
+    //         std::mem::take(&mut self.id),
+    //         std::mem::take(&mut self.block),
+    //     )
+    // }
 }
 
 impl BlockProducer {
