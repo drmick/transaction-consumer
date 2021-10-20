@@ -74,16 +74,16 @@ impl ProducedBlock {
 }
 
 impl BlockProducer {
-    pub fn new(group_id: &str, topic: String) -> Result<Self> {
+    pub fn new(group_id: &str, topic: String) -> Result<Arc<Self>> {
         let mut config = ClientConfig::default();
         config
             .set("group.id", group_id)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest");
-        Ok(Self {
+        Ok(Arc::new(Self {
             consumer: StreamConsumer::from_config(&config)?,
             topic,
-        })
+        }))
     }
 
     pub async fn stream_blocks(self: Arc<Self>) -> Result<impl Stream<Item = ProducedBlock>> {
