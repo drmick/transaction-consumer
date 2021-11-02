@@ -39,13 +39,13 @@ macro_rules! try_opt {
     };
 }
 
-pub struct ProducedBlock {
+pub struct ProducedTransaction {
     pub id: UInt256,
     pub transaction: ton_block::Transaction,
     commit_channel: Option<oneshot::Sender<()>>,
 }
 
-impl ProducedBlock {
+impl ProducedTransaction {
     fn new(id: UInt256, transaction: ton_block::Transaction) -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
         (
@@ -86,7 +86,7 @@ impl BlockProducer {
         }))
     }
 
-    pub async fn stream_blocks(self: Arc<Self>) -> Result<impl Stream<Item = ProducedBlock>> {
+    pub async fn stream_blocks(self: Arc<Self>) -> Result<impl Stream<Item = ProducedTransaction>> {
         self.consumer.subscribe(&[&self.topic])?;
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
@@ -107,7 +107,7 @@ impl BlockProducer {
                 let key = try_opt!(a.key(), "No key");
                 let key = UInt256::from_slice(key);
 
-                let (block, rx) = ProducedBlock::new(key, transaction);
+                let (block, rx) = ProducedTransaction::new(key, transaction);
                 if let Err(e) = tx.send(block).await {
                     log::error!("Failed sending via channel: {:?}", e);
                     return;
@@ -128,11 +128,12 @@ impl BlockProducer {
 
 #[cfg(test)]
 mod test {
-    use crate::ProducedBlock;
+    use crate::ProducedTransaction;
 
     #[tokio::test]
     async fn test() {
-        let (mut produced_block, rx) = ProducedBlock::new(Default::default(), Default::default());
+        let (mut produced_block, rx) =
+            ProducedTransaction::new(Default::default(), Default::default());
         produced_block.commit().unwrap();
         rx.await.unwrap();
     }
