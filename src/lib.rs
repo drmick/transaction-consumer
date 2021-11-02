@@ -3,15 +3,21 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::channel::oneshot;
 use futures::{SinkExt, Stream};
+use nekoton::transport::models::ExistingContract;
+use nekoton_utils::SimpleClock;
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::{ClientConfig, Message};
-use ton_block::Deserializable;
+use serde::Serialize;
+use ton_block::{Deserializable, MsgAddressInt};
 use ton_block_compressor::ZstdWrapper;
 use ton_types::UInt256;
+use url::Url;
 
-pub struct BlockProducer {
+pub struct TransactionProducer {
     consumer: StreamConsumer,
+    states_url: Url,
+    states_client: reqwest::Client,
     topic: String,
 }
 
@@ -73,15 +79,28 @@ impl ProducedTransaction {
     }
 }
 
-impl BlockProducer {
-    pub fn new(group_id: &str, topic: String) -> Result<Arc<Self>> {
+#[derive(Serialize)]
+struct StateReceiveRequest {
+    account_id: String,
+}
+
+impl TransactionProducer {
+    pub fn new<U>(group_id: &str, topic: String, states_rpc_endpoint: U) -> Result<Arc<Self>>
+    where
+        U: AsRef<str>,
+    {
         let mut config = ClientConfig::default();
         config
             .set("group.id", group_id)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest");
+
+        let states_rpc_endpoint =
+            Url::parse(states_rpc_endpoint.as_ref()).context("Bad rpc endpoint")?;
         Ok(Arc::new(Self {
             consumer: StreamConsumer::from_config(&config)?,
+            states_url: states_rpc_endpoint,
+            states_client: Default::default(),
             topic,
         }))
     }
@@ -123,6 +142,43 @@ impl BlockProducer {
             }
         });
         Ok(rx)
+    }
+
+    pub async fn get_contract_state(
+        &self,
+        contract_address: &MsgAddressInt,
+    ) -> Result<ExistingContract> {
+        let req = StateReceiveRequest {
+            account_id: hex::encode(contract_address.address().get_bytestring_on_stack(0)),
+        };
+        let bytes = self
+            .states_client
+            .post(self.states_url.clone()) //todo improve?
+            .json(&req)
+            .send()
+            .await
+            .context("Failed sending request")?
+            .bytes()
+            .await
+            .context("Failed getting raw data")?;
+        Ok(bincode::deserialize(bytes.as_ref())?)
+    }
+
+    pub async fn run_local(
+        &self,
+        contract_address: &MsgAddressInt,
+        function: &ton_abi::Function,
+        input: &[ton_abi::Token],
+    ) -> Result<nekoton_abi::ExecutionOutput> {
+        use nekoton_abi::FunctionExt;
+
+        let state = self.get_contract_state(contract_address).await?;
+        function.clone().run_local(
+            &SimpleClock,
+            state.account,
+            &state.last_transaction_id,
+            input,
+        )
     }
 }
 

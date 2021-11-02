@@ -5,9 +5,18 @@ version = "0.1.0"
 
 [dependencies]
 anyhow = "1"
+bincode = "1.3.3"
 futures = "0.3"
+hex = "0.4.3"
 log = "*"
+reqwest = { version = "0.11.6", features = ['json'] }
 serde = "1"
+url = "2.2.2"
+
+nekoton = { git = "https://github.com/broxus/nekoton.git", default-features = false }
+nekoton-abi = { git = "https://github.com/broxus/nekoton.git" }
+nekoton-utils = { git = "https://github.com/broxus/nekoton.git", default-features = false }
+ton_abi = { git = "https://github.com/broxus/ton-labs-abi" }
 
 [dependencies.rdkafka]
 features = ["sasl"]
@@ -25,3 +34,4 @@ git = "https://github.com/broxus/ton-labs-block"
 
 [dependencies.ton_types]
 git = "https://github.com/broxus/ton-labs-types"
+
