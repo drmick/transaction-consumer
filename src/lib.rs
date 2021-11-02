@@ -41,17 +41,17 @@ macro_rules! try_opt {
 
 pub struct ProducedBlock {
     pub id: UInt256,
-    pub block: ton_block::Block,
+    pub transaction: ton_block::Transaction,
     commit_channel: Option<oneshot::Sender<()>>,
 }
 
 impl ProducedBlock {
-    fn new(id: UInt256, block: ton_block::Block) -> (Self, oneshot::Receiver<()>) {
+    fn new(id: UInt256, transaction: ton_block::Transaction) -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
         (
             Self {
                 id,
-                block,
+                transaction,
                 commit_channel: Some(tx),
             },
             rx,
@@ -65,12 +65,12 @@ impl ProducedBlock {
         Ok(())
     }
 
-    // pub fn inner(&mut self) -> (UInt256, ton_block::Block) {
-    //     (
-    //         std::mem::take(&mut self.id),
-    //         std::mem::take(&mut self.block),
-    //     )
-    // }
+    pub fn get_inner_mut(&mut self) -> (UInt256, ton_block::Transaction) {
+        (
+            std::mem::take(&mut self.id),
+            std::mem::take(&mut self.transaction),
+        )
+    }
 }
 
 impl BlockProducer {
@@ -99,15 +99,15 @@ impl BlockProducer {
                     decompressor.decompress(payload),
                     "Failed decompressing block data"
                 );
-                let block = try_res!(
-                    ton_block::Block::construct_from_bytes(payload_decompressed),
+                let transaction = try_res!(
+                    ton_block::Transaction::construct_from_bytes(payload_decompressed),
                     "Failed constructing block"
                 );
 
                 let key = try_opt!(a.key(), "No key");
                 let key = UInt256::from_slice(key);
 
-                let (block, rx) = ProducedBlock::new(key, block);
+                let (block, rx) = ProducedBlock::new(key, transaction);
                 if let Err(e) = tx.send(block).await {
                     log::error!("Failed sending via channel: {:?}", e);
                     return;
