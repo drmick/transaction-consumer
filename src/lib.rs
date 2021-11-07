@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -85,7 +86,12 @@ struct StateReceiveRequest {
 }
 
 impl TransactionProducer {
-    pub fn new<U>(group_id: &str, topic: String, states_rpc_endpoint: U) -> Result<Arc<Self>>
+    pub fn new<U>(
+        group_id: &str,
+        topic: String,
+        states_rpc_endpoint: U,
+        options: HashMap<&str, &str>,
+    ) -> Result<Arc<Self>>
     where
         U: AsRef<str>,
     {
@@ -95,6 +101,9 @@ impl TransactionProducer {
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest");
 
+        for (k, v) in options {
+            config.set(k, v);
+        }
         let states_rpc_endpoint =
             Url::parse(states_rpc_endpoint.as_ref()).context("Bad rpc endpoint")?;
         Ok(Arc::new(Self {
