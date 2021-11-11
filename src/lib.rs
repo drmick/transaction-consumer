@@ -9,6 +9,7 @@ use nekoton_utils::SimpleClock;
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::{ClientConfig, Message};
+use reqwest::StatusCode;
 use serde::Serialize;
 use ton_block::{Deserializable, MsgAddressInt};
 use ton_block_compressor::ZstdWrapper;
@@ -156,21 +157,23 @@ impl TransactionProducer {
     pub async fn get_contract_state(
         &self,
         contract_address: &MsgAddressInt,
-    ) -> Result<ExistingContract> {
+    ) -> Result<Option<ExistingContract>> {
         let req = StateReceiveRequest {
             account_id: hex::encode(contract_address.address().get_bytestring_on_stack(0)),
         };
-        let bytes = self
+        let response = self
             .states_client
             .post(self.states_url.clone()) //todo improve?
             .json(&req)
             .send()
             .await
-            .context("Failed sending request")?
-            .bytes()
-            .await
-            .context("Failed getting raw data")?;
-        Ok(bincode::deserialize(bytes.as_ref())?)
+            .context("Failed sending request")?;
+        if let StatusCode::OK = response.status() {
+            let bytes = response.bytes().await.context("Failed getting raw data")?;
+            Ok(Some(bincode::deserialize(bytes.as_ref())?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn run_local(
@@ -178,16 +181,22 @@ impl TransactionProducer {
         contract_address: &MsgAddressInt,
         function: &ton_abi::Function,
         input: &[ton_abi::Token],
-    ) -> Result<nekoton_abi::ExecutionOutput> {
+    ) -> Result<Option<nekoton_abi::ExecutionOutput>> {
         use nekoton_abi::FunctionExt;
 
-        let state = self.get_contract_state(contract_address).await?;
-        function.clone().run_local(
-            &SimpleClock,
-            state.account,
-            &state.last_transaction_id,
-            input,
-        )
+        let state = match self.get_contract_state(contract_address).await? {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        function
+            .clone()
+            .run_local(
+                &SimpleClock,
+                state.account,
+                &state.last_transaction_id,
+                input,
+            )
+            .map(|x| Some(x))
     }
 }
 
