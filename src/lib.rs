@@ -109,7 +109,7 @@ impl TransactionProducer {
             Url::parse(states_rpc_endpoint.as_ref()).context("Bad rpc endpoint")?;
         Ok(Arc::new(Self {
             consumer: StreamConsumer::from_config(&config)?,
-            states_url: states_rpc_endpoint,
+            states_url: states_rpc_endpoint.join("account").unwrap(),
             states_client: Default::default(),
             topic,
         }))
@@ -168,9 +168,10 @@ impl TransactionProducer {
             .send()
             .await
             .context("Failed sending request")?;
+
+        println!("{:?}", response.status());
         if let StatusCode::OK = response.status() {
-            let bytes = response.bytes().await.context("Failed getting raw data")?;
-            Ok(Some(bincode::deserialize(bytes.as_ref())?))
+            Ok(Some(response.json().await?))
         } else {
             Ok(None)
         }
@@ -202,13 +203,29 @@ impl TransactionProducer {
 
 #[cfg(test)]
 mod test {
-    use crate::ProducedTransaction;
+    use std::default::Default;
+    use std::str::FromStr;
+    use ton_block::MsgAddressInt;
+
+    use crate::TransactionProducer;
 
     #[tokio::test]
-    async fn test() {
-        let (mut produced_block, rx) =
-            ProducedTransaction::new(Default::default(), Default::default());
-        produced_block.commit().unwrap();
-        rx.await.unwrap();
+    async fn test_get() {
+        let pr = TransactionProducer::new(
+            "test",
+            "test".to_string(),
+            "http://35.240.13.113:8081",
+            Default::default(),
+        )
+        .unwrap();
+        pr.get_contract_state(
+            &MsgAddressInt::from_str(
+                "0:8e2586602513e99a55fa2be08561469c7ce51a7d5a25977558e77ef2bc9387b4",
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     }
 }

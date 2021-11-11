@@ -17,7 +17,7 @@ nekoton = { git = "https://github.com/broxus/nekoton.git", default-features = fa
 nekoton-abi = { git = "https://github.com/broxus/nekoton.git" }
 nekoton-utils = { git = "https://github.com/broxus/nekoton.git", default-features = false }
 ton_abi = { git = "https://github.com/broxus/ton-labs-abi" }
-
+base64 = "0.13.0"
 [dependencies.rdkafka]
 features = ["sasl"]
 version = "0.26"
@@ -34,4 +34,3 @@ git = "https://github.com/broxus/ton-labs-block"
 
 [dependencies.ton_types]
 git = "https://github.com/broxus/ton-labs-types"
-
