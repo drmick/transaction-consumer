@@ -145,7 +145,7 @@ impl TransactionProducer {
                     log::warn!("Committer is dropped: {}", e);
                     continue;
                 } //waiting for commit
-                if let Err(e) = this.consumer.commit_consumer_state(CommitMode::Sync) {
+                if let Err(e) = this.consumer.commit_consumer_state(CommitMode::Async) {
                     log::error!("Failed committing: {:?}", e);
                     return;
                 }
@@ -169,7 +169,6 @@ impl TransactionProducer {
             .await
             .context("Failed sending request")?;
 
-        println!("{:?}", response.status());
         if let StatusCode::OK = response.status() {
             Ok(Some(response.json().await?))
         } else {
