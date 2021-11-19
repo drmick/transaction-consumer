@@ -18,9 +18,13 @@ nekoton-abi = { git = "https://github.com/broxus/nekoton.git" }
 nekoton-utils = { git = "https://github.com/broxus/nekoton.git", default-features = false }
 ton_abi = { git = "https://github.com/broxus/ton-labs-abi" }
 base64 = "0.13.0"
+
 [dependencies.rdkafka]
 features = ["sasl"]
 version = "0.26"
+
+[target.'cfg(target_os = "macos")'.dependencies.rdkafka]
+features = ["gssapi-vendored"]
 
 [dependencies.tokio]
 features = ["sync", "fs", "rt-multi-thread", "macros"]
