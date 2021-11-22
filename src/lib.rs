@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::channel::oneshot;
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{SinkExt, Stream};
 use nekoton::transport::models::ExistingContract;
 use nekoton_utils::SimpleClock;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::{ClientConfig, Message};
 use reqwest::StatusCode;
 use serde::Serialize;
-use tokio::sync::Barrier;
 use ton_block::{Deserializable, MsgAddressInt};
 use ton_block_compressor::ZstdWrapper;
 use ton_types::UInt256;
@@ -22,6 +22,8 @@ pub struct TransactionProducer {
     states_client: reqwest::Client,
     topic: String,
 }
+
+const NUM_TOPCIS: u8 = 9;
 
 macro_rules! try_res {
     ($some:expr, $msg:literal) => {
@@ -109,6 +111,7 @@ impl TransactionProducer {
         }
         let states_rpc_endpoint =
             Url::parse(states_rpc_endpoint.as_ref()).context("Bad rpc endpoint")?;
+
         Ok(Arc::new(Self {
             consumer_config: config,
             states_url: states_rpc_endpoint.join("account").unwrap(),
@@ -122,34 +125,31 @@ impl TransactionProducer {
         reset: bool,
     ) -> Result<impl Stream<Item = ProducedTransaction>> {
         let (tx, rx) = futures::channel::mpsc::channel(1);
-        let bar = Arc::new(tokio::sync::Barrier::new(9));
 
         let offset = if reset {
             rdkafka::Offset::Beginning
         } else {
             rdkafka::Offset::Stored
         };
-        let consumers = (0..9).map(|partition| {
-            let mut assignment = rdkafka::TopicPartitionList::new();
-            assignment
-                .add_partition_offset(&self.topic, partition as i32, offset)
-                .unwrap();
+        let consumers = (0..NUM_TOPCIS)
+            .map(|partition| {
+                let mut assignment = rdkafka::TopicPartitionList::new();
+                assignment
+                    .add_partition_offset(&self.topic, partition as i32, offset)
+                    .unwrap();
 
-            let consumer: StreamConsumer = self.consumer_config.create().unwrap_or_else(|e| {
-                panic!(
-                    "Consumer creation failed for partition {} - {}",
-                    partition, e
-                )
-            });
+                let consumer: StreamConsumer = self.consumer_config.create().unwrap_or_else(|e| {
+                    panic!(
+                        "Consumer creation failed for partition {} - {}",
+                        partition, e
+                    )
+                });
 
-            consumer.assign(&assignment).unwrap();
-            consumer
-        });
-
-        for consumer in consumers {
-            tokio::spawn(listen_consumer(consumer, tx.clone(), bar.clone()));
-        }
-
+                consumer.assign(&assignment).unwrap();
+                consumer
+            })
+            .collect();
+        tokio::spawn(async move { listen_consumer(consumers, tx) });
         Ok(rx)
     }
 
@@ -200,23 +200,24 @@ impl TransactionProducer {
 }
 
 async fn listen_consumer(
-    consumer: StreamConsumer,
+    consumers: Vec<StreamConsumer>,
     mut channel: futures::channel::mpsc::Sender<ProducedTransaction>,
-    barrier: Arc<Barrier>,
 ) {
     let mut decompressor = ZstdWrapper::new();
-    let mut messages = consumer.stream();
-    barrier.wait().await;
-    log::debug!("Started consumer {:?}", consumer.assignment());
+    let mut cur = 0;
 
-    while let Some(a) = messages.next().await {
-        let message = match a {
-            Ok(a) => a,
-            Err(e) => {
-                log::error!("FATAL KAFKA ERROR: {:?}", e);
-                continue;
-            }
+    loop {
+        let prod = &consumers[cur as usize];
+        let message = loop {
+            match prod.recv().await {
+                Ok(a) => break a,
+                Err(e) => {
+                    log::error!("Consumer {} is broken: {:?}", cur, e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            };
         };
+
         let payload = try_opt!(message.payload(), "no payload");
         let payload_decompressed = try_res!(
             decompressor.decompress(payload),
@@ -232,18 +233,19 @@ async fn listen_consumer(
 
         let (block, rx) = ProducedTransaction::new(key, transaction);
         if let Err(_) = channel.send(block).await {
-            log::error!("Failed sending via channel");
-            return;
+            panic!("Failed sending via channel");
         }
 
         if let Err(_) = rx.await {
             continue;
         } //waiting for commit
 
-        if let Err(e) = consumer.commit_consumer_state(CommitMode::Async) {
+        if let Err(e) = prod.commit_consumer_state(CommitMode::Async) {
             log::error!("Failed committing: {:?}", e);
             continue;
         }
+
+        cur = (cur + 1) % NUM_TOPCIS;
     }
 }
 
@@ -251,7 +253,11 @@ async fn listen_consumer(
 mod test {
     use std::default::Default;
     use std::str::FromStr;
+    use std::sync::atomic::AtomicU8;
+    use std::sync::Arc;
+    use std::time::Duration;
 
+    use tokio::sync::Notify;
     use ton_block::MsgAddressInt;
 
     use crate::TransactionProducer;
