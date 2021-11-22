@@ -120,6 +120,9 @@ impl TransactionProducer {
         }))
     }
 
+    /// Cancel safety.
+    /// Panics, if stream is dropped
+    #[must_use]
     pub async fn stream_blocks(
         self: Arc<Self>,
         reset: bool,
@@ -151,7 +154,8 @@ impl TransactionProducer {
                 consumer
             })
             .collect();
-        tokio::spawn(async move { listen_consumer(consumers, tx) });
+        tokio::spawn(async move { listen_consumer(consumers, tx).await });
+
         Ok(rx)
     }
 
@@ -255,13 +259,15 @@ async fn listen_consumer(
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
     use std::default::Default;
+    use std::io::Write;
     use std::str::FromStr;
-    use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::sync::Notify;
+    use futures::StreamExt;
+    use log::LevelFilter;
     use ton_block::MsgAddressInt;
 
     use crate::TransactionProducer;
