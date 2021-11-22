@@ -123,6 +123,7 @@ impl TransactionProducer {
     pub async fn stream_blocks(
         self: Arc<Self>,
         reset: bool,
+        process_masterchain: bool,
     ) -> Result<impl Stream<Item = ProducedTransaction>> {
         let (tx, rx) = futures::channel::mpsc::channel(1);
 
@@ -132,6 +133,7 @@ impl TransactionProducer {
             rdkafka::Offset::Stored
         };
         let consumers = (0..NUM_TOPCIS)
+            .filter(|x| if !process_masterchain { *x != 0 } else { true })
             .map(|partition| {
                 let mut assignment = rdkafka::TopicPartitionList::new();
                 assignment
@@ -205,6 +207,8 @@ async fn listen_consumer(
 ) {
     let mut decompressor = ZstdWrapper::new();
     let mut cur = 0;
+    let num_partitions = consumers.len();
+    log::info!("Starting {} subscribers", num_partitions);
 
     loop {
         let prod = &consumers[cur as usize];
@@ -245,7 +249,7 @@ async fn listen_consumer(
             continue;
         }
 
-        cur = (cur + 1) % NUM_TOPCIS;
+        cur = (cur + 1) % (num_partitions);
     }
 }
 
