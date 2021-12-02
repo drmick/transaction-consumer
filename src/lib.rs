@@ -8,13 +8,16 @@ use nekoton::transport::models::ExistingContract;
 use nekoton_utils::SimpleClock;
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
-use rdkafka::{ClientConfig, Message};
+use rdkafka::util::Timeout;
+use rdkafka::{ClientConfig, Message, Offset};
 use reqwest::StatusCode;
 use serde::Serialize;
 use ton_block::{Deserializable, MsgAddressInt};
 use ton_block_compressor::ZstdWrapper;
 use ton_types::UInt256;
 use url::Url;
+
+const NUM_PARTITIONS: i32 = 9;
 
 pub struct TransactionProducer {
     consumer: StreamConsumer,
@@ -113,6 +116,16 @@ impl TransactionProducer {
             states_client: Default::default(),
             topic,
         }))
+    }
+
+    /// BLOCKING FUNCTION
+    /// Resets all partitions to the beginning
+    pub fn reset_offsets(&self) -> Result<()> {
+        for i in 1..=NUM_PARTITIONS {
+            self.consumer
+                .seek(&self.topic, i, Offset::Beginning, Timeout::Never)?;
+        }
+        Ok(())
     }
 
     pub async fn stream_transactions(
