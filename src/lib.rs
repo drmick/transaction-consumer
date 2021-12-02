@@ -115,7 +115,9 @@ impl TransactionProducer {
         }))
     }
 
-    pub async fn stream_blocks(self: Arc<Self>) -> Result<impl Stream<Item = ProducedTransaction>> {
+    pub async fn stream_transactions(
+        self: Arc<Self>,
+    ) -> Result<impl Stream<Item = ProducedTransaction>> {
         self.consumer.subscribe(&[&self.topic])?;
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
@@ -138,16 +140,15 @@ impl TransactionProducer {
 
                 let (block, rx) = ProducedTransaction::new(key, transaction);
                 if let Err(e) = tx.send(block).await {
-                    log::error!("Failed sending via channel: {:?}", e);
+                    log::error!("Failed sending via channel: {:?}", e); //todo panic?
                     return;
                 }
-                if let Err(e) = rx.await {
-                    log::warn!("Committer is dropped: {}", e);
+                if rx.await.is_err() {
                     continue;
                 } //waiting for commit
                 if let Err(e) = this.consumer.commit_consumer_state(CommitMode::Async) {
                     log::error!("Failed committing: {:?}", e);
-                    return;
+                    continue;
                 }
             }
         });
@@ -196,7 +197,7 @@ impl TransactionProducer {
                 &state.last_transaction_id,
                 input,
             )
-            .map(|x| Some(x))
+            .map(Some)
     }
 }
 
@@ -204,6 +205,7 @@ impl TransactionProducer {
 mod test {
     use std::default::Default;
     use std::str::FromStr;
+
     use ton_block::MsgAddressInt;
 
     use crate::TransactionProducer;
