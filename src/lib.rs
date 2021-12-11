@@ -17,6 +17,8 @@ use ton_block_compressor::ZstdWrapper;
 use ton_types::UInt256;
 use url::Url;
 
+const NUM_PARTITIONS: i32 = 9;
+
 pub struct TransactionProducer {
     consumer: StreamConsumer,
     states_url: Url,
@@ -119,13 +121,7 @@ impl TransactionProducer {
     /// BLOCKING FUNCTION
     /// Resets all partitions to the beginning
     pub fn reset_offsets(&self) -> Result<()> {
-        for i in self
-            .consumer
-            .assignment()?
-            .elements()
-            .into_iter()
-            .map(|x| x.partition())
-        {
+        for i in 0..NUM_PARTITIONS {
             log::warn!("Reseting partition: {}", i);
             self.consumer
                 .seek(&self.topic, i, Offset::Beginning, Timeout::Never)?;
