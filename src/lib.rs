@@ -9,7 +9,7 @@ use nekoton_utils::SimpleClock;
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::util::Timeout;
-use rdkafka::{ClientConfig, Message, Offset};
+use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
 use reqwest::StatusCode;
 use serde::Serialize;
 use ton_block::{Deserializable, MsgAddressInt};
@@ -110,8 +110,15 @@ impl TransactionProducer {
         }
         let states_rpc_endpoint =
             Url::parse(states_rpc_endpoint.as_ref()).context("Bad rpc endpoint")?;
+        let consumer = StreamConsumer::from_config(&config)?;
+        let map = (0..NUM_PARTITIONS)
+            .map(|x| ((topic.clone(), x), Offset::Stored))
+            .collect();
+        let assignment = TopicPartitionList::from_topic_map(&map)?;
+        consumer.assign(&assignment)?;
+
         Ok(Arc::new(Self {
-            consumer: StreamConsumer::from_config(&config)?,
+            consumer,
             states_url: states_rpc_endpoint.join("account").unwrap(),
             states_client: Default::default(),
             topic,
