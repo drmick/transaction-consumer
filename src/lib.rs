@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,22 +11,13 @@ use nekoton_utils::SimpleClock;
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, ConsumerContext, StreamConsumer};
 use rdkafka::util::Timeout;
-use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
+use rdkafka::{ClientConfig, Message, Offset};
 use reqwest::StatusCode;
 use serde::Serialize;
 use ton_block::{Deserializable, MsgAddressInt};
 use ton_block_compressor::ZstdWrapper;
 use ton_types::UInt256;
 use url::Url;
-
-const NUM_PARTITIONS: i32 = 9;
-
-pub struct TransactionProducer {
-    consumer: StreamConsumer,
-    states_url: Url,
-    states_client: reqwest::Client,
-    topic: String,
-}
 
 macro_rules! try_res {
     ($some:expr, $msg:literal) => {
@@ -85,9 +77,12 @@ impl ProducedTransaction {
     }
 }
 
-#[derive(Serialize)]
-struct StateReceiveRequest {
-    account_id: String,
+pub struct TransactionProducer {
+    consumer: StreamConsumer,
+    states_url: Url,
+    states_client: reqwest::Client,
+    topic: String,
+    subscribed: AtomicBool,
 }
 
 impl TransactionProducer {
@@ -112,19 +107,23 @@ impl TransactionProducer {
         let states_rpc_endpoint =
             Url::parse(states_rpc_endpoint.as_ref()).context("Bad rpc endpoint")?;
         let consumer = StreamConsumer::from_config(&config)?;
-        consumer.subscribe(&[topic])?;
 
         Ok(Arc::new(Self {
             consumer,
             states_url: states_rpc_endpoint.join("account").unwrap(),
             states_client: Default::default(),
             topic: topic.to_string(),
+            subscribed: AtomicBool::new(false),
         }))
     }
 
     /// BLOCKING FUNCTION
     /// Resets all partitions to the beginning
     pub fn reset_offsets(&self) -> Result<()> {
+        if !self.subscribed.load(Ordering::Acquire) {
+            self.consumer.subscribe(&[&self.topic])?;
+            self.subscribed.store(true, Ordering::Release);
+        }
         let num_partitions = get_topic_partitions_count(&self.consumer, &self.topic)?;
         for i in 0..num_partitions {
             log::warn!("Resetting partition: {}", i);
@@ -141,7 +140,10 @@ impl TransactionProducer {
     pub async fn stream_transactions(
         self: Arc<Self>,
     ) -> Result<impl Stream<Item = ProducedTransaction>> {
-        self.consumer.subscribe(&[&self.topic])?;
+        if !self.subscribed.load(Ordering::Acquire) {
+            self.consumer.subscribe(&[&self.topic])?;
+            self.subscribed.store(true, Ordering::Release);
+        }
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
         let this = self;
@@ -182,6 +184,11 @@ impl TransactionProducer {
         &self,
         contract_address: &MsgAddressInt,
     ) -> Result<Option<ExistingContract>> {
+        #[derive(Serialize)]
+        struct StateReceiveRequest {
+            account_id: String,
+        }
+
         let req = StateReceiveRequest {
             account_id: hex::encode(contract_address.address().get_bytestring_on_stack(0)),
         };
