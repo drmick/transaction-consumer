@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::channel::oneshot;
@@ -7,7 +8,7 @@ use futures::{SinkExt, Stream};
 use nekoton::transport::models::ExistingContract;
 use nekoton_utils::SimpleClock;
 use rdkafka::config::FromClientConfig;
-use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
+use rdkafka::consumer::{CommitMode, Consumer, ConsumerContext, StreamConsumer};
 use rdkafka::util::Timeout;
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
 use reqwest::StatusCode;
@@ -92,7 +93,7 @@ struct StateReceiveRequest {
 impl TransactionProducer {
     pub fn new<U>(
         group_id: &str,
-        topic: String,
+        topic: &str,
         states_rpc_endpoint: U,
         options: HashMap<&str, &str>,
     ) -> Result<Arc<Self>>
@@ -111,27 +112,28 @@ impl TransactionProducer {
         let states_rpc_endpoint =
             Url::parse(states_rpc_endpoint.as_ref()).context("Bad rpc endpoint")?;
         let consumer = StreamConsumer::from_config(&config)?;
-        let map = (0..NUM_PARTITIONS)
-            .map(|x| ((topic.clone(), x), Offset::Stored))
-            .collect();
-        let assignment = TopicPartitionList::from_topic_map(&map)?;
-        consumer.assign(&assignment)?;
+        consumer.subscribe(&[topic])?;
 
         Ok(Arc::new(Self {
             consumer,
             states_url: states_rpc_endpoint.join("account").unwrap(),
             states_client: Default::default(),
-            topic,
+            topic: topic.to_string(),
         }))
     }
 
     /// BLOCKING FUNCTION
     /// Resets all partitions to the beginning
     pub fn reset_offsets(&self) -> Result<()> {
-        for i in 0..NUM_PARTITIONS {
-            log::warn!("Reseting partition: {}", i);
-            self.consumer
-                .seek(&self.topic, i, Offset::Beginning, Timeout::Never)?;
+        let num_partitions = get_topic_partitions_count(&self.consumer, &self.topic)?;
+        for i in 0..num_partitions {
+            log::warn!("Resetting partition: {}", i);
+            self.consumer.seek(
+                &self.topic,
+                i as i32,
+                Offset::Beginning,
+                Timeout::After(Duration::from_secs(30)),
+            )?;
         }
         Ok(())
     }
@@ -219,6 +221,27 @@ impl TransactionProducer {
                 input,
             )
             .map(Some)
+    }
+}
+
+fn get_topic_partitions_count<X: ConsumerContext, C: Consumer<X>>(
+    consumer: &C,
+    topic_name: &str,
+) -> Result<usize> {
+    let metadata = consumer
+        .fetch_metadata(Some(topic_name), Duration::from_secs(30))
+        .context("Failed to fetch metadata")?;
+
+    if metadata.topics().is_empty() {
+        anyhow::bail!("Topics is empty")
+    } else {
+        let partitions = metadata
+            .topics()
+            .iter()
+            .find(|x| x.name() == topic_name)
+            .map(|x| x.partitions().iter().count())
+            .context("No such topic")?;
+        Ok(partitions)
     }
 }
 
