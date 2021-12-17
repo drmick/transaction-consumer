@@ -9,9 +9,8 @@ use futures::{SinkExt, Stream};
 use nekoton::transport::models::ExistingContract;
 use nekoton_utils::SimpleClock;
 use rdkafka::config::FromClientConfig;
-use rdkafka::consumer::{CommitMode, Consumer, ConsumerContext, StreamConsumer};
-use rdkafka::util::Timeout;
-use rdkafka::{ClientConfig, Message, Offset};
+use rdkafka::consumer::{Consumer, ConsumerContext, StreamConsumer};
+use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
 use reqwest::StatusCode;
 use serde::Serialize;
 use ton_block::{Deserializable, MsgAddressInt};
@@ -98,7 +97,9 @@ impl TransactionProducer {
         let mut config = ClientConfig::default();
         config
             .set("group.id", group_id)
-            .set("enable.auto.commit", "false")
+            .set("enable.auto.commit", "true")
+            .set("auto.commit.interval.ms", "5000")
+            .set("enable.auto.offset.store", "false")
             .set("auto.offset.reset", "earliest");
 
         for (k, v) in options {
@@ -120,19 +121,19 @@ impl TransactionProducer {
     /// BLOCKING FUNCTION
     /// Resets all partitions to the beginning
     pub fn reset_offsets(&self) -> Result<()> {
+        self.subscribe(Offset::Beginning)
+    }
+
+    fn subscribe(&self, offset: Offset) -> Result<()> {
         if !self.subscribed.load(Ordering::Acquire) {
-            self.consumer.subscribe(&[&self.topic])?;
+            let num_partitions = get_topic_partitions_count(&self.consumer, &self.topic)?;
+            let mut assignment = TopicPartitionList::new();
+            for x in 0..num_partitions {
+                assignment.add_partition_offset(&self.topic, x as i32, offset)?;
+            }
+            log::info!("Assigning: {:?}", assignment);
+            self.consumer.assign(&assignment)?;
             self.subscribed.store(true, Ordering::Release);
-        }
-        let num_partitions = get_topic_partitions_count(&self.consumer, &self.topic)?;
-        for i in 0..num_partitions {
-            log::warn!("Resetting partition: {}", i);
-            self.consumer.seek(
-                &self.topic,
-                i as i32,
-                Offset::Beginning,
-                Timeout::After(Duration::from_secs(30)),
-            )?;
         }
         Ok(())
     }
@@ -140,17 +141,17 @@ impl TransactionProducer {
     pub async fn stream_transactions(
         self: Arc<Self>,
     ) -> Result<impl Stream<Item = ProducedTransaction>> {
-        if !self.subscribed.load(Ordering::Acquire) {
-            self.consumer.subscribe(&[&self.topic])?;
-            self.subscribed.store(true, Ordering::Release);
-        }
+        self.subscribe(Offset::Stored)?;
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
+
         let this = self;
+        log::info!("Statrting streaming");
         tokio::spawn(async move {
             let mut decompressor = ZstdWrapper::new();
-            while let Ok(a) = this.consumer.recv().await {
-                let payload = try_opt!(a.payload(), "no payload");
+
+            while let Ok(message) = this.consumer.recv().await {
+                let payload = try_opt!(message.payload(), "no payload");
                 let payload_decompressed = try_res!(
                     decompressor.decompress(payload),
                     "Failed decompressing block data"
@@ -160,7 +161,7 @@ impl TransactionProducer {
                     "Failed constructing block"
                 );
 
-                let key = try_opt!(a.key(), "No key");
+                let key = try_opt!(message.key(), "No key");
                 let key = UInt256::from_slice(key);
 
                 let (block, rx) = ProducedTransaction::new(key, transaction);
@@ -168,13 +169,16 @@ impl TransactionProducer {
                     log::error!("Failed sending via channel: {:?}", e); //todo panic?
                     return;
                 }
-                if rx.await.is_err() {
-                    continue;
-                } //waiting for commit
-                if let Err(e) = this.consumer.commit_consumer_state(CommitMode::Async) {
-                    log::error!("Failed committing: {:?}", e);
+
+                if let Err(_) = rx.await {
                     continue;
                 }
+
+                try_res!(
+                    this.consumer.store_offset_from_message(&message),
+                    "Failed committing"
+                );
+                log::debug!("Stored offsets");
             }
         });
         Ok(rx)
@@ -185,13 +189,14 @@ impl TransactionProducer {
         contract_address: &MsgAddressInt,
     ) -> Result<Option<ExistingContract>> {
         #[derive(Serialize)]
-        struct StateReceiveRequest {
-            account_id: String,
+        struct Request {
+            address: String,
         }
 
-        let req = StateReceiveRequest {
-            account_id: hex::encode(contract_address.address().get_bytestring_on_stack(0)),
+        let req = Request {
+            address: contract_address.to_string(),
         };
+
         let response = self
             .states_client
             .post(self.states_url.clone()) //todo improve?
@@ -265,14 +270,25 @@ mod test {
     async fn test_get() {
         let pr = TransactionProducer::new(
             "test",
-            "test".to_string(),
+            "test",
             "http://35.240.13.113:8081",
             Default::default(),
         )
         .unwrap();
+
         pr.get_contract_state(
             &MsgAddressInt::from_str(
                 "0:8e2586602513e99a55fa2be08561469c7ce51a7d5a25977558e77ef2bc9387b4",
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        pr.get_contract_state(
+            &MsgAddressInt::from_str(
+                "-1:efd5a14409a8a129686114fc092525fddd508f1ea56d1b649a3a695d3a5b188c",
             )
             .unwrap(),
         )

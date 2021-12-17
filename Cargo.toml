@@ -1,7 +1,7 @@
 [package]
 edition = "2018"
 name = "ton-consumer"
-version = "0.1.0"
+version = "0.2.0"
 
 [dependencies]
 anyhow = "1"
@@ -19,12 +19,11 @@ nekoton-utils = { git = "https://github.com/broxus/nekoton.git", default-feature
 ton_abi = { git = "https://github.com/broxus/ton-labs-abi" }
 base64 = "0.13.0"
 
-[dependencies.rdkafka]
-features = ["sasl"]
-version = "0.26"
+rdkafka = { version = "0.28.0", features = ["sasl"] }
 
 [target.'cfg(target_os = "macos")'.dependencies.rdkafka]
-features = ["gssapi-vendored"]
+features = ["gssapi-vendored", "sasl"]
+version = "0.28.0"
 
 [dependencies.tokio]
 features = ["sync", "fs", "rt-multi-thread", "macros"]
