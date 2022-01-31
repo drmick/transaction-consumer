@@ -104,12 +104,7 @@ impl StatesClient {
         };
         function
             .clone()
-            .run_local(
-                &SimpleClock,
-                state.account,
-                &state.last_transaction_id,
-                input,
-            )
+            .run_local(&SimpleClock, state.account, input)
             .map(Some)
     }
 }
