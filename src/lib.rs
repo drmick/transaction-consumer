@@ -84,7 +84,9 @@ impl StatesClient {
             .context("Failed sending request")?;
 
         if let StatusCode::OK = response.status() {
-            Ok(Some(response.json().await?))
+            let response: Option<ExistingContract> =
+                response.json().await.context("Failed parsing")?;
+            Ok(response)
         } else {
             Ok(None)
         }
@@ -296,22 +298,15 @@ fn get_topic_partitions_count<X: ConsumerContext, C: Consumer<X>>(
 
 #[cfg(test)]
 mod test {
-    use std::default::Default;
     use std::str::FromStr;
 
     use ton_block::MsgAddressInt;
 
-    use crate::TransactionProducer;
+    use crate::StatesClient;
 
     #[tokio::test]
     async fn test_get() {
-        let pr = TransactionProducer::new(
-            "test",
-            "test",
-            "http://35.240.13.113:8081",
-            Default::default(),
-        )
-        .unwrap();
+        let pr = StatesClient::new("http://35.240.13.113:8081").unwrap();
 
         pr.get_contract_state(
             &MsgAddressInt::from_str(
@@ -332,5 +327,15 @@ mod test {
         .await
         .unwrap()
         .unwrap();
+        assert!(pr
+            .get_contract_state(
+                &MsgAddressInt::from_str(
+                    "-1:aaa5a14409a8a129686114fc092525fddd508f1ea56d1b649a3a695d3a5b188c",
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_none());
     }
 }
