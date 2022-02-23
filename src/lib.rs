@@ -151,6 +151,7 @@ impl TransactionProducer {
 
     /// BLOCKING FUNCTION
     /// Resets all partitions to the beginning
+    /// NOTE: I shouldn't be already subscribed
     pub fn reset_offsets(&self) -> Result<()> {
         self.subscribe(Offset::Beginning)
     }
@@ -165,6 +166,8 @@ impl TransactionProducer {
             log::info!("Assigning: {:?}", assignment);
             self.consumer.assign(&assignment)?;
             self.subscribed.store(true, Ordering::Release);
+        } else {
+            anyhow::bail!("Already subscribed")
         }
         Ok(())
     }
