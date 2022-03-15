@@ -77,7 +77,7 @@ impl StatesClient {
 
         let response = self
             .client
-            .post(self.url.clone()) //todo improve?
+            .post(self.url.clone())
             .json(&req)
             .send()
             .await
@@ -111,14 +111,14 @@ impl StatesClient {
     }
 }
 
-pub struct TransactionProducer {
+pub struct TransactionConsumer {
     consumer: StreamConsumer,
     states_client: StatesClient,
     topic: String,
     subscribed: AtomicBool,
 }
 
-impl TransactionProducer {
+impl TransactionConsumer {
     pub fn new<U>(
         group_id: &str,
         topic: &str,
@@ -157,30 +157,33 @@ impl TransactionProducer {
     }
 
     fn subscribe(&self, offset: Offset) -> Result<()> {
-        if !self.subscribed.load(Ordering::Acquire) {
-            let num_partitions = get_topic_partitions_count(&self.consumer, &self.topic)?;
-            let mut assignment = TopicPartitionList::new();
-            for x in 0..num_partitions {
-                assignment.add_partition_offset(&self.topic, x as i32, offset)?;
-            }
-            log::info!("Assigning: {:?}", assignment);
-            self.consumer.assign(&assignment)?;
-            self.subscribed.store(true, Ordering::Release);
-        } else {
+        if self.subscribed.load(Ordering::Acquire) {
             anyhow::bail!("Already subscribed")
         }
+
+        let num_partitions = get_topic_partition_count(&self.consumer, &self.topic)?;
+
+        let mut assignment = TopicPartitionList::new();
+        for x in 0..num_partitions {
+            assignment.add_partition_offset(&self.topic, x as i32, offset)?;
+        }
+
+        log::info!("Assigning: {:?}", assignment);
+        self.consumer.assign(&assignment)?;
+
+        self.subscribed.store(true, Ordering::Release);
         Ok(())
     }
 
     pub async fn stream_transactions(
         self: Arc<Self>,
-    ) -> Result<impl Stream<Item = ProducedTransaction>> {
+    ) -> Result<impl Stream<Item = ConsumedTransaction>> {
         self.subscribe(Offset::Stored)?;
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
         let this = self;
-        log::info!("Statrting streaming");
+        log::info!("Starting streaming");
         tokio::spawn(async move {
             let mut decompressor = ZstdWrapper::new();
 
@@ -190,7 +193,9 @@ impl TransactionProducer {
                     decompressor.decompress(payload),
                     "Failed decompressing block data"
                 );
+
                 tokio::task::yield_now().await;
+
                 let transaction = try_res!(
                     ton_block::Transaction::construct_from_bytes(payload_decompressed),
                     "Failed constructing block"
@@ -199,7 +204,7 @@ impl TransactionProducer {
                 let key = try_opt!(message.key(), "No key");
                 let key = UInt256::from_slice(key);
 
-                let (block, rx) = ProducedTransaction::new(key, transaction);
+                let (block, rx) = ConsumedTransaction::new(key, transaction);
                 if let Err(e) = tx.send(block).await {
                     log::error!("Failed sending via channel: {:?}", e); //todo panic?
                     return;
@@ -216,6 +221,7 @@ impl TransactionProducer {
                 log::debug!("Stored offsets");
             }
         });
+
         Ok(rx)
     }
 
@@ -244,13 +250,14 @@ impl TransactionProducer {
     }
 }
 
-pub struct ProducedTransaction {
+pub struct ConsumedTransaction {
     pub id: UInt256,
     pub transaction: ton_block::Transaction,
+
     commit_channel: Option<oneshot::Sender<()>>,
 }
 
-impl ProducedTransaction {
+impl ConsumedTransaction {
     fn new(id: UInt256, transaction: ton_block::Transaction) -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
         (
@@ -262,7 +269,8 @@ impl ProducedTransaction {
             rx,
         )
     }
-    pub fn commit(&mut self) -> Result<()> {
+
+    pub fn commit(mut self) -> Result<()> {
         let committer = self.commit_channel.take().context("Already committed")?;
         committer
             .send(())
@@ -270,15 +278,12 @@ impl ProducedTransaction {
         Ok(())
     }
 
-    pub fn get_inner_mut(&mut self) -> (UInt256, ton_block::Transaction) {
-        (
-            std::mem::take(&mut self.id),
-            std::mem::take(&mut self.transaction),
-        )
+    pub fn into_inner(self) -> (UInt256, ton_block::Transaction) {
+        (self.id, self.transaction)
     }
 }
 
-fn get_topic_partitions_count<X: ConsumerContext, C: Consumer<X>>(
+fn get_topic_partition_count<X: ConsumerContext, C: Consumer<X>>(
     consumer: &C,
     topic_name: &str,
 ) -> Result<usize> {
@@ -288,15 +293,15 @@ fn get_topic_partitions_count<X: ConsumerContext, C: Consumer<X>>(
 
     if metadata.topics().is_empty() {
         anyhow::bail!("Topics is empty")
-    } else {
-        let partitions = metadata
-            .topics()
-            .iter()
-            .find(|x| x.name() == topic_name)
-            .map(|x| x.partitions().iter().count())
-            .context("No such topic")?;
-        Ok(partitions)
     }
+
+    let partitions = metadata
+        .topics()
+        .iter()
+        .find(|x| x.name() == topic_name)
+        .map(|x| x.partitions().iter().count())
+        .context("No such topic")?;
+    Ok(partitions)
 }
 
 #[cfg(test)]

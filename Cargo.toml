@@ -1,39 +1,31 @@
 [package]
 edition = "2021"
-name = "ton-consumer"
-version = "0.5.0"
+name = "transaction-consumer"
+version = "0.6.0"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.13.0"
 bincode = "1.3.3"
 futures = "0.3"
 hex = "0.4.3"
-log = "*"
-reqwest = { version = "0.11.6", features = ['json'] }
+log = "0.4.14"
+rdkafka = { version = "0.28.0", features = ["sasl"] }
+reqwest = { version = "0.11.10", features = ['json'] }
 serde = "1"
 url = "2.2.2"
+tokio = { version = "1.17", features = ["sync", "fs", "rt", "macros"] }
 
 nekoton = { git = "https://github.com/broxus/nekoton.git", default-features = false }
 nekoton-abi = { git = "https://github.com/broxus/nekoton.git" }
 nekoton-utils = { git = "https://github.com/broxus/nekoton.git", default-features = false }
-ton_abi = { git = "https://github.com/broxus/ton-labs-abi" }
-base64 = "0.13.0"
 
-rdkafka = { version = "0.28.0", features = ["sasl"] }
+ton_abi = { git = "https://github.com/broxus/ton-labs-abi" }
+ton_block = { git = "https://github.com/broxus/ton-labs-block" }
+ton_types = { git = "https://github.com/broxus/ton-labs-types" }
+
+ton-block-compressor = { git = "https://github.com/broxus/ton-block-compressor" }
 
 [target.'cfg(target_os = "macos")'.dependencies.rdkafka]
 features = ["gssapi-vendored", "sasl"]
 version = "0.28.0"
-
-[dependencies.tokio]
-features = ["sync", "fs", "rt-multi-thread", "macros"]
-version = "1"
-
-[dependencies.ton-block-compressor]
-git = "ssh://git@gitlab.dexpa.io/beton/ton-block-compressor.git"
-
-[dependencies.ton_block]
-git = "https://github.com/broxus/ton-labs-block"
-
-[dependencies.ton_types]
-git = "https://github.com/broxus/ton-labs-types"
