@@ -149,13 +149,6 @@ impl TransactionConsumer {
         }))
     }
 
-    /// BLOCKING FUNCTION
-    /// Resets all partitions to the beginning
-    /// NOTE: I shouldn't be already subscribed
-    pub fn reset_offsets(&self) -> Result<()> {
-        self.subscribe(Offset::Beginning)
-    }
-
     fn subscribe(&self, offset: Offset) -> Result<()> {
         if self.subscribed.load(Ordering::Acquire) {
             anyhow::bail!("Already subscribed")
@@ -177,8 +170,13 @@ impl TransactionConsumer {
 
     pub async fn stream_transactions(
         self: Arc<Self>,
+        reset: bool,
     ) -> Result<impl Stream<Item = ConsumedTransaction>> {
-        self.subscribe(Offset::Stored)?;
+        if reset {
+            self.subscribe(Offset::Beginning)?;
+        } else {
+            self.subscribe(Offset::Stored)?;
+        }
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
