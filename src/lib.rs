@@ -8,6 +8,7 @@ use futures::channel::oneshot;
 use futures::{SinkExt, Stream};
 use nekoton::transport::models::ExistingContract;
 use nekoton_utils::SimpleClock;
+use parking_lot::Mutex;
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{Consumer, ConsumerContext, StreamConsumer};
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
@@ -116,6 +117,7 @@ pub struct TransactionConsumer {
     states_client: StatesClient,
     topic: String,
     subscribed: AtomicBool,
+    lowest_time: Mutex<HashMap<u16, u32>>,
 }
 
 impl TransactionConsumer {
@@ -146,6 +148,7 @@ impl TransactionConsumer {
             states_client: StatesClient::new(states_rpc_endpoint)?,
             topic: topic.to_string(),
             subscribed: AtomicBool::new(false),
+            lowest_time: Default::default(),
         }))
     }
 
@@ -166,6 +169,20 @@ impl TransactionConsumer {
 
         self.subscribed.store(true, Ordering::Release);
         Ok(())
+    }
+
+    fn update_highest_time(&self, time: u32, partition: u16) {
+        let mut lowest_time = self.lowest_time.lock();
+        let partition_time = lowest_time.entry(partition).or_insert(time);
+        if time > *partition_time {
+            *partition_time = time;
+        }
+    }
+
+    pub fn get_lowest_time(&self) -> u32 {
+        let lowest_time = self.lowest_time.lock();
+
+        lowest_time.values().cloned().min().unwrap_or(0)
     }
 
     pub async fn stream_transactions(
@@ -198,7 +215,7 @@ impl TransactionConsumer {
                     ton_block::Transaction::construct_from_bytes(payload_decompressed),
                     "Failed constructing block"
                 );
-
+                this.update_highest_time(transaction.now, message.partition() as u16);
                 let key = try_opt!(message.key(), "No key");
                 let key = UInt256::from_slice(key);
 
