@@ -118,6 +118,7 @@ pub struct TransactionConsumer {
     topic: String,
     subscribed: AtomicBool,
     lowest_time: Mutex<HashMap<u16, u32>>,
+    config: ClientConfig,
 }
 
 impl TransactionConsumer {
@@ -149,6 +150,7 @@ impl TransactionConsumer {
             topic: topic.to_string(),
             subscribed: AtomicBool::new(false),
             lowest_time: Default::default(),
+            config,
         }))
     }
 
@@ -183,6 +185,38 @@ impl TransactionConsumer {
         let lowest_time = self.lowest_time.lock();
 
         lowest_time.values().cloned().min().unwrap_or(0)
+    }
+
+    pub async fn get_latest_timestamps(&self) -> Result<u32> {
+        let mut latest_timestamps = HashMap::new();
+
+        let num_partitions = get_topic_partition_count(&self.consumer, &self.topic)?;
+
+        let mut assignment = TopicPartitionList::new();
+        for x in 0..num_partitions {
+            assignment.add_partition_offset(&self.topic, x as i32, Offset::OffsetTail(10))?;
+        }
+
+        let mut config = self.config.clone();
+        config.set(
+            "group.id",
+            format!("{}-meta", self.config.get("group.id").unwrap()),
+        );
+        let client: StreamConsumer = StreamConsumer::from_config(&self.config)?;
+        client.assign(&assignment)?;
+
+        let mut decompressor = ZstdWrapper::new();
+        while latest_timestamps.len() != num_partitions {
+            let msg = client.recv().await?;
+            let payload = msg.payload().context("No payload")?;
+            let payload_decompressed = decompressor.decompress(payload)?;
+            let transaction = ton_block::Transaction::construct_from_bytes(payload_decompressed)?;
+            let partition = msg.partition() as u16;
+            let time = transaction.now;
+            latest_timestamps.insert(partition, time);
+        }
+
+        Ok(latest_timestamps.values().copied().max().unwrap_or(0))
     }
 
     pub async fn stream_transactions(
