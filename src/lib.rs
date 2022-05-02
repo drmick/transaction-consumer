@@ -6,14 +6,15 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures::channel::oneshot;
 use futures::{SinkExt, Stream};
-use nekoton::transport::models::ExistingContract;
+use nekoton::transport::models::{ExistingContract, RawContractState};
 use nekoton_utils::SimpleClock;
 use parking_lot::Mutex;
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{Consumer, ConsumerContext, StreamConsumer};
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
 use reqwest::StatusCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use ton_block::{Deserializable, MsgAddressInt};
 use ton_block_compressor::ZstdWrapper;
 use ton_types::UInt256;
@@ -55,12 +56,10 @@ impl StatesClient {
         U: AsRef<str>,
     {
         let client = reqwest::Client::new();
-        let states_rpc_endpoint =
-            Url::parse(states_rpc_endpoint.as_ref()).context("Bad rpc endpoint")?;
-        Ok(Self {
-            client,
-            url: states_rpc_endpoint.join("account")?,
-        })
+        let url = Url::parse(states_rpc_endpoint.as_ref())
+            .context("Bad rpc endpoint")?
+            .join("/rpc")?;
+        Ok(Self { client, url })
     }
 
     pub async fn get_contract_state(
@@ -72,8 +71,46 @@ impl StatesClient {
             address: String,
         }
 
+        #[derive(Serialize)]
+        struct Jrpc {
+            jsonrpc: &'static str,
+            id: i32,
+            method: &'static str,
+            params: Request,
+        }
+
+        #[derive(Serialize, Debug, Deserialize)]
+        /// A JSON-RPC response.
+        pub struct JsonRpcRepsonse {
+            jsonrpc: String,
+            pub result: JsonRpcAnswer,
+            /// The request ID.
+            id: i64,
+        }
+
+        #[derive(Serialize, Debug, Deserialize)]
+        #[serde(untagged)]
+        /// JsonRpc [response object](https://www.jsonrpc.org/specification#response_object)
+        pub enum JsonRpcAnswer {
+            Result(Value),
+            Error(JsonRpcError),
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct JsonRpcError {
+            code: i32,
+            message: String,
+        }
+
         let req = Request {
             address: contract_address.to_string(),
+        };
+
+        let req = Jrpc {
+            jsonrpc: "2.0",
+            id: 0,
+            method: "getContractState",
+            params: req,
         };
 
         let response = self
@@ -85,8 +122,20 @@ impl StatesClient {
             .context("Failed sending request")?;
 
         if let StatusCode::OK = response.status() {
-            let response: Option<ExistingContract> =
-                response.json().await.context("Failed parsing")?;
+            let response = response.text().await?;
+            let response: JsonRpcRepsonse = serde_json::from_str(&response)?;
+            let response = match response.result {
+                JsonRpcAnswer::Result(response) => {
+                    serde_json::from_value(response).context("Bad answer")?
+                }
+                JsonRpcAnswer::Error(response) => {
+                    anyhow::bail!("{:?}", response)
+                }
+            };
+            let response = match response {
+                RawContractState::NotExists => None,
+                RawContractState::Exists(c) => Some(c),
+            };
             Ok(response)
         } else {
             Ok(None)
@@ -328,6 +377,7 @@ fn get_topic_partition_count<X: ConsumerContext, C: Consumer<X>>(
 
 #[cfg(test)]
 mod test {
+    use nekoton::transport::models::RawContractState;
     use std::str::FromStr;
 
     use ton_block::MsgAddressInt;
