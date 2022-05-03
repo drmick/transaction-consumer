@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+pub use ever_jrpc_client::LoadBalancedRpcOptions;
+use ever_jrpc_client::{JrpcRequest, LoadBalancedRpc};
 use futures::channel::oneshot;
 use futures::{SinkExt, Stream};
 use nekoton::transport::models::{ExistingContract, RawContractState};
@@ -12,9 +14,7 @@ use parking_lot::Mutex;
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{Consumer, ConsumerContext, StreamConsumer};
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
-use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Serialize;
 use ton_block::{Deserializable, MsgAddressInt};
 use ton_block_compressor::ZstdWrapper;
 use ton_types::UInt256;
@@ -44,22 +44,30 @@ macro_rules! try_opt {
     };
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StatesClient {
-    client: reqwest::Client,
-    url: Url,
+    client: LoadBalancedRpc,
 }
 
 impl StatesClient {
-    pub fn new<U>(states_rpc_endpoint: U) -> Result<StatesClient>
+    pub async fn new<I, U>(
+        states_rpc_endpoint: I,
+        options: Option<LoadBalancedRpcOptions>,
+    ) -> Result<StatesClient>
     where
+        I: IntoIterator<Item = U>,
         U: AsRef<str>,
     {
-        let client = reqwest::Client::new();
-        let url = Url::parse(states_rpc_endpoint.as_ref())
-            .context("Bad rpc endpoint")?
-            .join("/rpc")?;
-        Ok(Self { client, url })
+        let endpoints: Result<Vec<_>, _> = states_rpc_endpoint
+            .into_iter()
+            .map(|x| Url::parse(x.as_ref()).and_then(|x| x.join("/rpc")))
+            .collect();
+        let options = options.unwrap_or(LoadBalancedRpcOptions {
+            prove_interval: Duration::from_secs(10),
+        });
+        let client = LoadBalancedRpc::new(endpoints.context("Bad endpoints")?, options).await?;
+
+        Ok(Self { client })
     }
 
     pub async fn get_contract_state(
@@ -71,75 +79,24 @@ impl StatesClient {
             address: String,
         }
 
-        #[derive(Serialize)]
-        struct Jrpc {
-            jsonrpc: &'static str,
-            id: i32,
-            method: &'static str,
-            params: Request,
-        }
-
-        #[derive(Serialize, Debug, Deserialize)]
-        /// A JSON-RPC response.
-        pub struct JsonRpcRepsonse {
-            jsonrpc: String,
-            pub result: JsonRpcAnswer,
-            /// The request ID.
-            id: i64,
-        }
-
-        #[derive(Serialize, Debug, Deserialize)]
-        #[serde(untagged)]
-        /// JsonRpc [response object](https://www.jsonrpc.org/specification#response_object)
-        pub enum JsonRpcAnswer {
-            Result(Value),
-            Error(JsonRpcError),
-        }
-
-        #[derive(Debug, Serialize, Deserialize)]
-        pub struct JsonRpcError {
-            code: i32,
-            message: String,
-        }
-
         let req = Request {
             address: contract_address.to_string(),
         };
 
-        let req = Jrpc {
-            jsonrpc: "2.0",
-            id: 0,
+        let req = JrpcRequest {
+            id: 13,
             method: "getContractState",
             params: req,
         };
 
-        let response = self
-            .client
-            .post(self.url.clone())
-            .json(&req)
-            .send()
-            .await
-            .context("Failed sending request")?;
-
-        if let StatusCode::OK = response.status() {
-            let response = response.text().await?;
-            let response: JsonRpcRepsonse = serde_json::from_str(&response)?;
-            let response = match response.result {
-                JsonRpcAnswer::Result(response) => {
-                    serde_json::from_value(response).context("Bad answer")?
-                }
-                JsonRpcAnswer::Error(response) => {
-                    anyhow::bail!("{:?}", response)
-                }
-            };
-            let response = match response {
-                RawContractState::NotExists => None,
-                RawContractState::Exists(c) => Some(c),
-            };
-            Ok(response)
-        } else {
-            Ok(None)
-        }
+        let response = self.client.request(req).await;
+        dbg!(&response);
+        let parsed: RawContractState = response.unwrap()?;
+        let response = match parsed {
+            RawContractState::NotExists => None,
+            RawContractState::Exists(c) => Some(c),
+        };
+        Ok(response)
     }
 
     pub async fn run_local(
@@ -170,13 +127,16 @@ pub struct TransactionConsumer {
 }
 
 impl TransactionConsumer {
-    pub fn new<U>(
+    /// [states_rpc_endpoint] - list of endpoints of states rpcs without /rpc suffix
+    pub async fn new<I, U>(
         group_id: &str,
         topic: &str,
-        states_rpc_endpoint: U,
+        states_rpc_endpoints: I,
+        rpc_options: Option<LoadBalancedRpcOptions>,
         options: HashMap<&str, &str>,
     ) -> Result<Arc<Self>>
     where
+        I: IntoIterator<Item = U>,
         U: AsRef<str>,
     {
         let mut config = ClientConfig::default();
@@ -194,7 +154,7 @@ impl TransactionConsumer {
 
         Ok(Arc::new(Self {
             consumer,
-            states_client: StatesClient::new(states_rpc_endpoint)?,
+            states_client: StatesClient::new(states_rpc_endpoints, rpc_options).await?,
             topic: topic.to_string(),
             subscribed: AtomicBool::new(false),
             lowest_time: Default::default(),
@@ -377,7 +337,6 @@ fn get_topic_partition_count<X: ConsumerContext, C: Consumer<X>>(
 
 #[cfg(test)]
 mod test {
-    use nekoton::transport::models::RawContractState;
     use std::str::FromStr;
 
     use ton_block::MsgAddressInt;
@@ -386,7 +345,9 @@ mod test {
 
     #[tokio::test]
     async fn test_get() {
-        let pr = StatesClient::new("http://35.240.13.113:8081").unwrap();
+        let pr = StatesClient::new(["http://35.240.13.113:8081"], None)
+            .await
+            .unwrap();
 
         pr.get_contract_state(
             &MsgAddressInt::from_str(
