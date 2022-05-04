@@ -1,3 +1,4 @@
+#![deny(clippy::dbg_macro)]
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;

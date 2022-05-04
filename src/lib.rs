@@ -1,3 +1,5 @@
+#![deny(clippy::dbg_macro)]
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -90,7 +92,6 @@ impl StatesClient {
         };
 
         let response = self.client.request(req).await;
-        dbg!(&response);
         let parsed: RawContractState = response.unwrap()?;
         let response = match parsed {
             RawContractState::NotExists => None,
