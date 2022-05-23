@@ -1,7 +1,6 @@
 #![deny(clippy::dbg_macro)]
-
+use futures::StreamExt;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +11,6 @@ use futures::channel::oneshot;
 use futures::{SinkExt, Stream};
 use nekoton::transport::models::{ExistingContract, RawContractState};
 use nekoton_utils::SimpleClock;
-use parking_lot::Mutex;
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{Consumer, ConsumerContext, StreamConsumer};
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
@@ -120,11 +118,9 @@ impl StatesClient {
 }
 
 pub struct TransactionConsumer {
-    consumer: StreamConsumer,
     states_client: StatesClient,
     topic: String,
-    subscribed: AtomicBool,
-    lowest_time: Mutex<HashMap<u16, u32>>,
+    config: ClientConfig,
 }
 
 impl TransactionConsumer {
@@ -151,23 +147,18 @@ impl TransactionConsumer {
         for (k, v) in options {
             config.set(k, v);
         }
-        let consumer = StreamConsumer::from_config(&config)?;
 
         Ok(Arc::new(Self {
-            consumer,
             states_client: StatesClient::new(states_rpc_endpoints, rpc_options).await?,
             topic: topic.to_string(),
-            subscribed: AtomicBool::new(false),
-            lowest_time: Default::default(),
+            config,
         }))
     }
 
-    fn subscribe(&self, offset: Offset) -> Result<()> {
-        if self.subscribed.load(Ordering::Acquire) {
-            anyhow::bail!("Already subscribed")
-        }
+    fn subscribe(&self, offset: Offset) -> Result<Arc<StreamConsumer>> {
+        let consumer = StreamConsumer::from_config(&self.config)?;
 
-        let num_partitions = get_topic_partition_count(&self.consumer, &self.topic)?;
+        let num_partitions = get_topic_partition_count(&consumer, &self.topic)?;
 
         let mut assignment = TopicPartitionList::new();
         for x in 0..num_partitions {
@@ -175,51 +166,29 @@ impl TransactionConsumer {
         }
 
         log::info!("Assigning: {:?}", assignment);
-        self.consumer.assign(&assignment)?;
-
-        self.subscribed.store(true, Ordering::Release);
-        Ok(())
-    }
-
-    fn update_highest_time(&self, time: u32, partition: u16) {
-        let mut lowest_time = self.lowest_time.lock();
-        let partition_time = lowest_time.entry(partition).or_insert(time);
-        if time > *partition_time {
-            *partition_time = time;
-        }
-    }
-
-    pub fn get_lowest_time(&self) -> u32 {
-        let mut lowest_time = self.lowest_time.lock();
-        let time = lowest_time
-            .values()
-            .filter(|x| **x != 0)
-            .cloned()
-            .min()
-            .unwrap_or(0);
-        lowest_time.clear();
-
-        time
+        consumer.assign(&assignment)?;
+        Ok(Arc::new(consumer))
     }
 
     pub async fn stream_transactions(
-        self: Arc<Self>,
+        &self,
         reset: bool,
     ) -> Result<impl Stream<Item = ConsumedTransaction>> {
-        if reset {
-            self.subscribe(Offset::Beginning)?;
+        let consumer = if reset {
+            self.subscribe(Offset::Beginning)?
         } else {
-            self.subscribe(Offset::Stored)?;
-        }
+            self.subscribe(Offset::Stored)?
+        };
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
-        let this = self;
         log::info!("Starting streaming");
         tokio::spawn(async move {
             let mut decompressor = ZstdWrapper::new();
-
-            while let Ok(message) = this.consumer.recv().await {
+            let stream = consumer.stream();
+            tokio::pin!(stream);
+            while let Some(message) = stream.next().await {
+                let message = try_res!(message, "Failed to get message");
                 let payload = try_opt!(message.payload(), "no payload");
                 let payload_decompressed = try_res!(
                     decompressor.decompress(payload),
@@ -232,7 +201,6 @@ impl TransactionConsumer {
                     ton_block::Transaction::construct_from_bytes(payload_decompressed),
                     "Failed constructing block"
                 );
-                this.update_highest_time(transaction.now, message.partition() as u16);
                 let key = try_opt!(message.key(), "No key");
                 let key = UInt256::from_slice(key);
 
@@ -247,13 +215,94 @@ impl TransactionConsumer {
                 }
 
                 try_res!(
-                    this.consumer.store_offset_from_message(&message),
+                    consumer.store_offset_from_message(&message),
                     "Failed committing"
                 );
                 log::debug!("Stored offsets");
             }
         });
 
+        Ok(rx)
+    }
+
+    pub async fn stream_until_highest_offsets(
+        &self,
+        reset: bool,
+    ) -> Result<impl Stream<Item = ConsumedTransaction>> {
+        let consumer = if reset {
+            self.subscribe(Offset::Beginning)?
+        } else {
+            self.subscribe(Offset::Stored)?
+        };
+
+        let (tx, rx) = futures::channel::mpsc::channel(1);
+
+        let this = self;
+
+        let highest_offsets = get_latest_offsets(consumer.as_ref(), &this.topic)?;
+        for (part, highest_offset) in highest_offsets {
+            let consumer = consumer.clone();
+            let queue = match consumer.split_partition_queue(&this.topic, part) {
+                Some(a) => a,
+                None => {
+                    log::error!(
+                        "Failed splitting partition queue for {} {}",
+                        this.topic,
+                        part
+                    );
+                    continue;
+                }
+            };
+            let mut tx = tx.clone();
+            tokio::spawn(async move {
+                let mut decompressor = ZstdWrapper::new();
+                let stream = queue.stream();
+                tokio::pin!(stream);
+                while let Some(message) = stream.next().await {
+                    let message = try_res!(message, "Failed to get message");
+                    let offset = message.offset();
+                    if offset >= highest_offset {
+                        log::debug!(
+                            "Received message with higher offset than highest: {} >= {}. Partition: {}",
+                            offset,
+                            highest_offset,
+                            part
+                        );
+                        break;
+                    }
+                    let payload = try_opt!(message.payload(), "no payload");
+                    let payload_decompressed = try_res!(
+                        decompressor.decompress(payload),
+                        "Failed decompressing block data"
+                    );
+
+                    tokio::task::yield_now().await;
+
+                    let transaction = try_res!(
+                        ton_block::Transaction::construct_from_bytes(payload_decompressed),
+                        "Failed constructing block"
+                    );
+                    let key = try_opt!(message.key(), "No key");
+                    let key = UInt256::from_slice(key);
+
+                    let (block, rx) = ConsumedTransaction::new(key, transaction);
+                    if let Err(e) = tx.send(block).await {
+                        log::error!("Failed sending via channel: {:?}", e); //todo panic?
+                        return;
+                    }
+
+                    if rx.await.is_err() {
+                        continue;
+                    }
+
+                    try_res!(
+                        consumer.store_offset_from_message(&message),
+                        "Failed committing"
+                    );
+                    log::debug!("Stored offsets");
+                }
+            });
+        }
         Ok(rx)
     }
 
@@ -334,6 +383,24 @@ fn get_topic_partition_count<X: ConsumerContext, C: Consumer<X>>(
         .map(|x| x.partitions().iter().count())
         .context("No such topic")?;
     Ok(partitions)
+}
+
+fn get_latest_offsets<X: ConsumerContext, C: Consumer<X>>(
+    consumer: &C,
+    topic_name: &str,
+) -> Result<Vec<(i32, i64)>> {
+    let topic_partition_count = get_topic_partition_count(consumer, topic_name)?;
+    let mut parts_info = Vec::with_capacity(topic_partition_count);
+
+    for part in 0..topic_partition_count {
+        let offset = consumer
+            .fetch_watermarks(topic_name, part as i32, Duration::from_secs(30))
+            .with_context(|| format!("Failed to fetch offset {}", part))?
+            .1;
+        parts_info.push((part as i32, offset));
+    }
+
+    Ok(parts_info)
 }
 
 #[cfg(test)]
