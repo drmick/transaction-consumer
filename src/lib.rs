@@ -121,6 +121,13 @@ pub struct TransactionConsumer {
     states_client: StatesClient,
     topic: String,
     config: ClientConfig,
+    skip_0_partition: bool,
+}
+
+pub struct ConsumerOptions<'opts> {
+    kafka_options: HashMap<&'opts str, &'opts str>,
+    /// read from masterchain or not
+    skip_0_partition: bool,
 }
 
 impl TransactionConsumer {
@@ -130,7 +137,7 @@ impl TransactionConsumer {
         topic: &str,
         states_rpc_endpoints: I,
         rpc_options: Option<LoadBalancedRpcOptions>,
-        options: HashMap<&str, &str>,
+        options: ConsumerOptions<'_>,
     ) -> Result<Arc<Self>>
     where
         I: IntoIterator<Item = U>,
@@ -144,7 +151,7 @@ impl TransactionConsumer {
             .set("enable.auto.offset.store", "false")
             .set("auto.offset.reset", "latest");
 
-        for (k, v) in options {
+        for (k, v) in options.kafka_options {
             config.set(k, v);
         }
 
@@ -152,6 +159,7 @@ impl TransactionConsumer {
             states_client: StatesClient::new(states_rpc_endpoints, rpc_options).await?,
             topic: topic.to_string(),
             config,
+            skip_0_partition: options.skip_0_partition,
         }))
     }
 
@@ -161,7 +169,8 @@ impl TransactionConsumer {
         let num_partitions = get_topic_partition_count(&consumer, &self.topic)?;
 
         let mut assignment = TopicPartitionList::new();
-        for x in 0..num_partitions {
+        let start = if self.skip_0_partition { 1 } else { 0 };
+        for x in start..num_partitions {
             assignment.add_partition_offset(&self.topic, x as i32, offset)?;
         }
 
