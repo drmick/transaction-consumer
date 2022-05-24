@@ -248,7 +248,8 @@ impl TransactionConsumer {
 
         let this = self;
 
-        let highest_offsets = get_latest_offsets(consumer.as_ref(), &this.topic)?;
+        let highest_offsets =
+            get_latest_offsets(consumer.as_ref(), &this.topic, self.skip_0_partition)?;
         for (part, highest_offset) in highest_offsets {
             let consumer = consumer.clone();
             let queue = match consumer.split_partition_queue(&this.topic, part) {
@@ -397,11 +398,13 @@ fn get_topic_partition_count<X: ConsumerContext, C: Consumer<X>>(
 fn get_latest_offsets<X: ConsumerContext, C: Consumer<X>>(
     consumer: &C,
     topic_name: &str,
+    skip_0_partition: bool,
 ) -> Result<Vec<(i32, i64)>> {
     let topic_partition_count = get_topic_partition_count(consumer, topic_name)?;
     let mut parts_info = Vec::with_capacity(topic_partition_count);
+    let start = if skip_0_partition { 1 } else { 0 };
 
-    for part in 0..topic_partition_count {
+    for part in start..topic_partition_count {
         let offset = consumer
             .fetch_watermarks(topic_name, part as i32, Duration::from_secs(30))
             .with_context(|| format!("Failed to fetch offset {}", part))?
