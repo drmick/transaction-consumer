@@ -125,9 +125,9 @@ pub struct TransactionConsumer {
 }
 
 pub struct ConsumerOptions<'opts> {
-    kafka_options: HashMap<&'opts str, &'opts str>,
+    pub kafka_options: HashMap<&'opts str, &'opts str>,
     /// read from masterchain or not
-    skip_0_partition: bool,
+    pub skip_0_partition: bool,
 }
 
 impl TransactionConsumer {
