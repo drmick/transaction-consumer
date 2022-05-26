@@ -12,7 +12,7 @@ use futures::{SinkExt, Stream};
 use nekoton::transport::models::{ExistingContract, RawContractState};
 use nekoton_utils::SimpleClock;
 use rdkafka::config::FromClientConfig;
-use rdkafka::consumer::{Consumer, ConsumerContext, StreamConsumer};
+use rdkafka::consumer::{CommitMode, Consumer, ConsumerContext, StreamConsumer};
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
 use serde::Serialize;
 use ton_block::{Deserializable, MsgAddressInt};
@@ -268,6 +268,21 @@ impl TransactionConsumer {
                 let mut decompressor = ZstdWrapper::new();
                 let stream = queue.stream();
                 tokio::pin!(stream);
+
+                if highest_offset == 0 {
+                    log::warn!(
+                        "Skipping partition {}. Highest offset: {}",
+                        part,
+                        highest_offset
+                    );
+                    return;
+                } else {
+                    log::warn!(
+                        "Starting stream for partition {}. Highest offset: {}",
+                        part,
+                        highest_offset
+                    );
+                }
                 while let Some(message) = stream.next().await {
                     let message = try_res!(message, "Failed to get message");
                     let offset = message.offset();
@@ -278,6 +293,9 @@ impl TransactionConsumer {
                             highest_offset,
                             part
                         );
+                        if let Err(e) = consumer.commit_message(&message, CommitMode::Sync) {
+                            log::error!("Failed committing final message: {:?}", e);
+                        }
                         break;
                     }
                     let payload = try_opt!(message.payload(), "no payload");
