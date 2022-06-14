@@ -1,19 +1,17 @@
 #![deny(clippy::dbg_macro)]
-use futures::StreamExt;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 pub use ever_jrpc_client::LoadBalancedRpcOptions;
 use ever_jrpc_client::{JrpcRequest, LoadBalancedRpc};
-use futures::channel::oneshot;
-use futures::{SinkExt, Stream};
+use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
 use nekoton::transport::models::{ExistingContract, RawContractState};
 use nekoton_utils::SimpleClock;
-use rdkafka::config::FromClientConfig;
-use rdkafka::consumer::{CommitMode, Consumer, ConsumerContext, StreamConsumer};
-use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
+use rdkafka::{
+    config::FromClientConfig,
+    consumer::{CommitMode, Consumer, ConsumerContext, StreamConsumer},
+    ClientConfig, Message, Offset, TopicPartitionList,
+};
 use serde::Serialize;
 use ton_block::{Deserializable, MsgAddressInt};
 use ton_block_compressor::ZstdWrapper;
@@ -163,12 +161,28 @@ impl TransactionConsumer {
         }))
     }
 
-    fn subscribe(&self, offset: Offset) -> Result<Arc<StreamConsumer>> {
+    fn subscribe(&self, stream_from: StreamFrom) -> Result<Arc<StreamConsumer>> {
         let consumer = StreamConsumer::from_config(&self.config)?;
+        let mut assignment = TopicPartitionList::new();
+
+        let offset = match stream_from {
+            StreamFrom::Offsets(offsets) => {
+                for (partition, offset) in offsets.0.iter() {
+                    assignment.add_partition_offset(
+                        &self.topic,
+                        *partition,
+                        Offset::Offset(*offset),
+                    )?;
+                }
+                consumer.assign(&assignment)?;
+                return Ok(Arc::new(consumer));
+            }
+            StreamFrom::Begging => Offset::Beginning,
+            StreamFrom::End => Offset::End,
+            StreamFrom::Stored => Offset::Stored,
+        };
 
         let num_partitions = get_topic_partition_count(&consumer, &self.topic)?;
-
-        let mut assignment = TopicPartitionList::new();
         let start = if self.skip_0_partition { 1 } else { 0 };
         for x in start..num_partitions {
             assignment.add_partition_offset(&self.topic, x as i32, offset)?;
@@ -181,13 +195,9 @@ impl TransactionConsumer {
 
     pub async fn stream_transactions(
         &self,
-        reset: bool,
+        from: StreamFrom,
     ) -> Result<impl Stream<Item = ConsumedTransaction>> {
-        let consumer = if reset {
-            self.subscribe(Offset::Beginning)?
-        } else {
-            self.subscribe(Offset::Stored)?
-        };
+        let consumer = self.subscribe(from)?;
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
@@ -213,7 +223,12 @@ impl TransactionConsumer {
                 let key = try_opt!(message.key(), "No key");
                 let key = UInt256::from_slice(key);
 
-                let (block, rx) = ConsumedTransaction::new(key, transaction);
+                let (block, rx) = ConsumedTransaction::new(
+                    key,
+                    transaction,
+                    message.offset(),
+                    message.partition(),
+                );
                 if let Err(e) = tx.send(block).await {
                     log::error!("Failed sending via channel: {:?}", e); //todo panic?
                     return;
@@ -236,13 +251,9 @@ impl TransactionConsumer {
 
     pub async fn stream_until_highest_offsets(
         &self,
-        reset: bool,
-    ) -> Result<impl Stream<Item = ConsumedTransaction>> {
-        let consumer = if reset {
-            self.subscribe(Offset::Beginning)?
-        } else {
-            self.subscribe(Offset::Stored)?
-        };
+        from: StreamFrom,
+    ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
+        let consumer = self.subscribe(from)?;
 
         let (tx, rx) = futures::channel::mpsc::channel(1);
 
@@ -250,6 +261,8 @@ impl TransactionConsumer {
 
         let highest_offsets =
             get_latest_offsets(consumer.as_ref(), &this.topic, self.skip_0_partition)?;
+        let offsets = Offsets(HashMap::from_iter(highest_offsets.iter().copied()));
+
         for (part, highest_offset) in highest_offsets {
             let consumer = consumer.clone();
             let queue = match consumer.split_partition_queue(&this.topic, part) {
@@ -313,7 +326,12 @@ impl TransactionConsumer {
                     let key = try_opt!(message.key(), "No key");
                     let key = UInt256::from_slice(key);
 
-                    let (block, rx) = ConsumedTransaction::new(key, transaction);
+                    let (block, rx) = ConsumedTransaction::new(
+                        key,
+                        transaction,
+                        message.offset(),
+                        message.partition(),
+                    );
                     if let Err(e) = tx.send(block).await {
                         log::error!("Failed sending via channel: {:?}", e); //todo panic?
                         return;
@@ -331,7 +349,7 @@ impl TransactionConsumer {
                 }
             });
         }
-        Ok(rx)
+        Ok((rx, offsets))
     }
 
     pub async fn get_contract_state(
@@ -359,20 +377,40 @@ impl TransactionConsumer {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum StreamFrom {
+    Begging,
+    Stored,
+    End,
+    Offsets(Offsets),
+}
+
+#[derive(Debug, Clone)]
+pub struct Offsets(pub HashMap<i32, i64>);
+
 pub struct ConsumedTransaction {
     pub id: UInt256,
     pub transaction: ton_block::Transaction,
 
+    pub offset: i64,
+    pub partition: i32,
     commit_channel: Option<oneshot::Sender<()>>,
 }
 
 impl ConsumedTransaction {
-    fn new(id: UInt256, transaction: ton_block::Transaction) -> (Self, oneshot::Receiver<()>) {
+    fn new(
+        id: UInt256,
+        transaction: ton_block::Transaction,
+        offset: i64,
+        partition: i32,
+    ) -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
         (
             Self {
                 id,
                 transaction,
+                offset,
+                partition,
                 commit_channel: Some(tx),
             },
             rx,

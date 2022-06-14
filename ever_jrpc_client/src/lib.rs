@@ -1,15 +1,16 @@
 #![deny(clippy::dbg_macro)]
-use std::collections::HashSet;
-use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::HashSet,
+    fmt::{Debug, Formatter},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Result;
 use futures::StreamExt;
 use parking_lot::RwLock;
 use reqwest::Url;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
