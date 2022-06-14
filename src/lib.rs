@@ -177,7 +177,7 @@ impl TransactionConsumer {
                 consumer.assign(&assignment)?;
                 return Ok(Arc::new(consumer));
             }
-            StreamFrom::Begging => Offset::Beginning,
+            StreamFrom::Beginning => Offset::Beginning,
             StreamFrom::End => Offset::End,
             StreamFrom::Stored => Offset::Stored,
         };
@@ -379,7 +379,7 @@ impl TransactionConsumer {
 
 #[derive(Debug, Clone)]
 pub enum StreamFrom {
-    Begging,
+    Beginning,
     Stored,
     End,
     Offsets(Offsets),
