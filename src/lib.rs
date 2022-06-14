@@ -299,7 +299,7 @@ impl TransactionConsumer {
                 while let Some(message) = stream.next().await {
                     let message = try_res!(message, "Failed to get message");
                     let offset = message.offset();
-                    if offset >= highest_offset {
+                    if offset >= highest_offset - 1 {
                         log::debug!(
                             "Received message with higher offset than highest: {} >= {}. Partition: {}",
                             offset,
