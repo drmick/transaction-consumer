@@ -166,27 +166,16 @@ impl TransactionConsumer {
         let consumer = StreamConsumer::from_config(&self.config)?;
         let mut assignment = TopicPartitionList::new();
 
-        let offset = match stream_from {
-            StreamFrom::Offsets(offsets) => {
-                for (partition, offset) in offsets.0.iter() {
-                    assignment.add_partition_offset(
-                        &self.topic,
-                        *partition,
-                        Offset::Offset(*offset),
-                    )?;
-                }
-                consumer.assign(&assignment)?;
-                return Ok(Arc::new(consumer));
-            }
-            StreamFrom::Beginning => Offset::Beginning,
-            StreamFrom::End => Offset::End,
-            StreamFrom::Stored => Offset::Stored,
-        };
-
         let num_partitions = get_topic_partition_count(&consumer, &self.topic)?;
         let start = if self.skip_0_partition { 1 } else { 0 };
         for x in start..num_partitions {
-            assignment.add_partition_offset(&self.topic, x as i32, offset)?;
+            assignment.add_partition_offset(
+                &self.topic,
+                x as i32,
+                stream_from
+                    .get_offset(x as i32)
+                    .with_context(|| format!("No offset for {x} partition"))?,
+            )?;
         }
 
         log::info!("Assigning: {:?}", assignment);
@@ -254,14 +243,13 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
-        let consumer = self.subscribe(&from)?;
+        let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
 
         let (tx, rx) = futures::channel::mpsc::channel(1);
 
         let this = self;
 
-        let highest_offsets =
-            get_latest_offsets(consumer.as_ref(), &this.topic, self.skip_0_partition)?;
+        let highest_offsets = get_latest_offsets(&consumer, &this.topic, self.skip_0_partition)?;
         let tpl = consumer.assignment()?;
         let stored = consumer.committed_offsets(tpl, None)?;
         let stored: Vec<TopicPartitionListElem> = stored.elements_for_topic(&this.topic);
@@ -272,20 +260,10 @@ impl TransactionConsumer {
                 .copied()
                 .map(|(k, v)| (k, v.checked_sub(1).unwrap_or(0))),
         ));
-        for (part, highest_offset) in highest_offsets {
-            let consumer = consumer.clone();
-            let queue = match consumer.split_partition_queue(&this.topic, part) {
-                Some(a) => a,
-                None => {
-                    log::error!(
-                        "Failed splitting partition queue for {} {}",
-                        this.topic,
-                        part
-                    );
-                    continue;
-                }
-            };
-            let mut tx = tx.clone();
+
+        drop(consumer);
+
+        for (part, highest_offset) in offsets.0.iter().map(|(k, v)| (*k, *v)) {
             let commited_offset = if let &StreamFrom::Stored = &from {
                 stored
                     .iter()
@@ -294,48 +272,53 @@ impl TransactionConsumer {
             } else {
                 None
             };
+
+            // check if we have to skip this partition
+            if let Some(Offset::Offset(of)) = commited_offset {
+                if of >= highest_offset - 1 {
+                    log::warn!("Stored offset is equal to highest offset");
+                    continue;
+                }
+            }
+
+            if highest_offset == 0 {
+                log::warn!(
+                    "Skipping partition {}. Highest offset: {}",
+                    part,
+                    highest_offset
+                );
+                continue;
+            } else {
+                log::warn!(
+                    "Starting stream for partition {}. Highest offset: {}",
+                    part,
+                    highest_offset
+                );
+            }
+
+            let consumer: StreamConsumer = StreamConsumer::from_config(&this.config)?;
+            let mut tx = tx.clone();
+            let mut tpl = TopicPartitionList::new();
+            let ofset = match from.get_offset(part) {
+                Some(of) => of,
+                None => {
+                    log::warn!("No offset for partition {}", part);
+                    continue;
+                }
+            };
+
+            tpl.add_partition_offset(&this.topic, part, ofset)?;
+            consumer.assign(&tpl)?;
+
             tokio::spawn(async move {
-                let mut decompressor = ZstdWrapper::new();
-                let stream = queue.stream();
+                let stream = consumer.stream();
                 tokio::pin!(stream);
 
-                if let Some(Offset::Offset(of)) = commited_offset {
-                    if of >= highest_offset - 1 {
-                        log::warn!("Stored offset is equal to highest offset");
-                        return;
-                    }
-                }
-
-                if highest_offset == 0 {
-                    log::warn!(
-                        "Skipping partition {}. Highest offset: {}",
-                        part,
-                        highest_offset
-                    );
-                    return;
-                } else {
-                    log::warn!(
-                        "Starting stream for partition {}. Highest offset: {}",
-                        part,
-                        highest_offset
-                    );
-                }
+                let mut decompressor = ZstdWrapper::new();
 
                 while let Some(message) = stream.next().await {
                     let message = try_res!(message, "Failed to get message");
-                    let offset = message.offset();
-                    if offset >= highest_offset - 1 {
-                        log::info!(
-                            "Received message with higher offset than highest: {} >= {}. Partition: {}",
-                            offset,
-                            highest_offset,
-                            part
-                        );
-                        if let Err(e) = consumer.commit_message(&message, CommitMode::Sync) {
-                            log::error!("Failed committing final message: {:?}", e);
-                        }
-                        break;
-                    }
+
                     let payload = try_opt!(message.payload(), "no payload");
                     let payload_decompressed = try_res!(
                         decompressor.decompress(payload),
@@ -360,6 +343,20 @@ impl TransactionConsumer {
                     if let Err(e) = tx.send(block).await {
                         log::error!("Failed sending via channel: {:?}", e); //todo panic?
                         return;
+                    }
+
+                    let offset = message.offset();
+                    if offset >= highest_offset {
+                        log::info!(
+                            "Received message with higher offset than highest: {} >= {}. Partition: {}",
+                            offset,
+                            highest_offset,
+                            part
+                        );
+                        if let Err(e) = consumer.commit_message(&message, CommitMode::Sync) {
+                            log::error!("Failed committing final message: {:?}", e);
+                        }
+                        break;
                     }
 
                     if rx.await.is_err() {
@@ -408,6 +405,17 @@ pub enum StreamFrom {
     Stored,
     End,
     Offsets(Offsets),
+}
+
+impl StreamFrom {
+    pub fn get_offset(&self, part: i32) -> Option<Offset> {
+        match &self {
+            StreamFrom::Beginning => Some(Offset::Beginning),
+            StreamFrom::Stored => Some(Offset::Stored),
+            StreamFrom::End => Some(Offset::End),
+            StreamFrom::Offsets(offsets) => offsets.0.get(&part).map(|x| Offset::Offset(*x)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
