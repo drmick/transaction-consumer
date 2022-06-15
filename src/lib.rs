@@ -7,6 +7,7 @@ use ever_jrpc_client::{JrpcRequest, LoadBalancedRpc};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
 use nekoton::transport::models::{ExistingContract, RawContractState};
 use nekoton_utils::SimpleClock;
+use rdkafka::topic_partition_list::TopicPartitionListElem;
 use rdkafka::{
     config::FromClientConfig,
     consumer::{CommitMode, Consumer, ConsumerContext, StreamConsumer},
@@ -161,7 +162,7 @@ impl TransactionConsumer {
         }))
     }
 
-    fn subscribe(&self, stream_from: StreamFrom) -> Result<Arc<StreamConsumer>> {
+    fn subscribe(&self, stream_from: &StreamFrom) -> Result<Arc<StreamConsumer>> {
         let consumer = StreamConsumer::from_config(&self.config)?;
         let mut assignment = TopicPartitionList::new();
 
@@ -197,7 +198,7 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<impl Stream<Item = ConsumedTransaction>> {
-        let consumer = self.subscribe(from)?;
+        let consumer = self.subscribe(&from)?;
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
@@ -253,7 +254,7 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
-        let consumer = self.subscribe(from)?;
+        let consumer = self.subscribe(&from)?;
 
         let (tx, rx) = futures::channel::mpsc::channel(1);
 
@@ -261,8 +262,16 @@ impl TransactionConsumer {
 
         let highest_offsets =
             get_latest_offsets(consumer.as_ref(), &this.topic, self.skip_0_partition)?;
-        let offsets = Offsets(HashMap::from_iter(highest_offsets.iter().copied()));
+        let tpl = consumer.assignment()?;
+        let stored = consumer.committed_offsets(tpl, None)?;
+        let stored: Vec<TopicPartitionListElem> = stored.elements_for_topic(&this.topic);
 
+        let offsets = Offsets(HashMap::from_iter(
+            highest_offsets
+                .iter()
+                .copied()
+                .map(|(k, v)| (k, v.checked_sub(1).unwrap_or(0))),
+        ));
         for (part, highest_offset) in highest_offsets {
             let consumer = consumer.clone();
             let queue = match consumer.split_partition_queue(&this.topic, part) {
@@ -277,10 +286,25 @@ impl TransactionConsumer {
                 }
             };
             let mut tx = tx.clone();
+            let commited_offset = if let &StreamFrom::Stored = &from {
+                stored
+                    .iter()
+                    .find(|p| p.partition() == part)
+                    .map(|x| x.offset())
+            } else {
+                None
+            };
             tokio::spawn(async move {
                 let mut decompressor = ZstdWrapper::new();
                 let stream = queue.stream();
                 tokio::pin!(stream);
+
+                if let Some(Offset::Offset(of)) = commited_offset {
+                    if of >= highest_offset - 1 {
+                        log::warn!("Stored offset is equal to highest offset");
+                        return;
+                    }
+                }
 
                 if highest_offset == 0 {
                     log::warn!(
@@ -296,11 +320,12 @@ impl TransactionConsumer {
                         highest_offset
                     );
                 }
+
                 while let Some(message) = stream.next().await {
                     let message = try_res!(message, "Failed to get message");
                     let offset = message.offset();
                     if offset >= highest_offset - 1 {
-                        log::debug!(
+                        log::info!(
                             "Received message with higher offset than highest: {} >= {}. Partition: {}",
                             offset,
                             highest_offset,
