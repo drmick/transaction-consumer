@@ -148,7 +148,7 @@ impl TransactionConsumer {
             .set("enable.auto.commit", "true")
             .set("auto.commit.interval.ms", "5000")
             .set("enable.auto.offset.store", "false")
-            .set("auto.offset.reset", "latest");
+            .set("auto.offset.reset", "earliest");
 
         for (k, v) in options.kafka_options {
             config.set(k, v);
@@ -250,7 +250,13 @@ impl TransactionConsumer {
         let this = self;
 
         let highest_offsets = get_latest_offsets(&consumer, &this.topic, self.skip_0_partition)?;
-        let tpl = consumer.assignment()?;
+        let mut tpl = TopicPartitionList::new();
+        for (part, _) in &highest_offsets {
+            if let Err(e) = tpl.add_partition_offset(&this.topic, *part as i32, Offset::Stored) {
+                log::warn!("Failed to get stored offset for {}: {:?}", part, e);
+                continue;
+            }
+        }
         let stored = consumer.committed_offsets(tpl, None)?;
         let stored: Vec<TopicPartitionListElem> = stored.elements_for_topic(&this.topic);
 
@@ -262,7 +268,6 @@ impl TransactionConsumer {
         ));
 
         drop(consumer);
-
         for (part, highest_offset) in offsets.0.iter().map(|(k, v)| (*k, *v)) {
             let commited_offset = if let &StreamFrom::Stored = &from {
                 stored
@@ -276,7 +281,12 @@ impl TransactionConsumer {
             // check if we have to skip this partition
             if let Some(Offset::Offset(of)) = commited_offset {
                 if of >= highest_offset {
-                    log::warn!("Stored offset is equal to highest offset");
+                    log::warn!(
+                        "Stored offset is equal to highest offset: {} == {}. Part: {}",
+                        of,
+                        highest_offset,
+                        part
+                    );
                     continue;
                 }
             }
