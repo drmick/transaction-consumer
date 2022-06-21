@@ -275,7 +275,7 @@ impl TransactionConsumer {
 
             // check if we have to skip this partition
             if let Some(Offset::Offset(of)) = commited_offset {
-                if of >= highest_offset - 1 {
+                if of >= highest_offset {
                     log::warn!("Stored offset is equal to highest offset");
                     continue;
                 }
