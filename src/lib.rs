@@ -3,8 +3,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-pub use everscale_jrpc_client::JrpcClientOptions;
-use everscale_jrpc_client::{JrpcClient};
+pub use everscale_jrpc_client::{JrpcClientOptions, JrpcClient};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
 use nekoton::transport::models::{ExistingContract, };
 use rdkafka::topic_partition_list::TopicPartitionListElem;
