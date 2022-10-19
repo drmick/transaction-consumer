@@ -1,19 +1,18 @@
 #![deny(clippy::dbg_macro)]
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-pub use ever_jrpc_client::LoadBalancedRpcOptions;
-use ever_jrpc_client::{JrpcRequest, LoadBalancedRpc};
+pub use everscale_jrpc_client::JrpcClientOptions;
+use everscale_jrpc_client::{JrpcClient};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
-use nekoton::transport::models::{ExistingContract, RawContractState};
-use nekoton_utils::SimpleClock;
+use nekoton::transport::models::{ExistingContract, };
 use rdkafka::topic_partition_list::TopicPartitionListElem;
 use rdkafka::{
     config::FromClientConfig,
     consumer::{CommitMode, Consumer, ConsumerContext, StreamConsumer},
     ClientConfig, Message, Offset, TopicPartitionList,
 };
-use serde::Serialize;
 use ton_block::{Deserializable, MsgAddressInt};
 use ton_block_compressor::ZstdWrapper;
 use ton_types::UInt256;
@@ -43,81 +42,8 @@ macro_rules! try_opt {
     };
 }
 
-#[derive(Clone)]
-pub struct StatesClient {
-    client: LoadBalancedRpc,
-}
-
-impl StatesClient {
-    pub async fn new<I, U>(
-        states_rpc_endpoint: I,
-        options: Option<LoadBalancedRpcOptions>,
-    ) -> Result<StatesClient>
-    where
-        I: IntoIterator<Item = U>,
-        U: AsRef<str>,
-    {
-        let endpoints: Result<Vec<_>, _> = states_rpc_endpoint
-            .into_iter()
-            .map(|x| Url::parse(x.as_ref()).and_then(|x| x.join("/rpc")))
-            .collect();
-        let options = options.unwrap_or(LoadBalancedRpcOptions {
-            prove_interval: Duration::from_secs(10),
-        });
-        let client = LoadBalancedRpc::new(endpoints.context("Bad endpoints")?, options).await?;
-
-        Ok(Self { client })
-    }
-
-    pub async fn get_contract_state(
-        &self,
-        contract_address: &MsgAddressInt,
-    ) -> Result<Option<ExistingContract>> {
-        #[derive(Serialize)]
-        struct Request {
-            address: String,
-        }
-
-        let req = Request {
-            address: contract_address.to_string(),
-        };
-
-        let req = JrpcRequest {
-            id: 13,
-            method: "getContractState",
-            params: req,
-        };
-
-        let response = self.client.request(req).await;
-        let parsed: RawContractState = response.unwrap()?;
-        let response = match parsed {
-            RawContractState::NotExists => None,
-            RawContractState::Exists(c) => Some(c),
-        };
-        Ok(response)
-    }
-
-    pub async fn run_local(
-        &self,
-        contract_address: &MsgAddressInt,
-        function: &ton_abi::Function,
-        input: &[ton_abi::Token],
-    ) -> Result<Option<nekoton_abi::ExecutionOutput>> {
-        use nekoton_abi::FunctionExt;
-
-        let state = match self.get_contract_state(contract_address).await? {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-        function
-            .clone()
-            .run_local(&SimpleClock, state.account, input)
-            .map(Some)
-    }
-}
-
 pub struct TransactionConsumer {
-    states_client: StatesClient,
+    states_client: JrpcClient,
     topic: String,
     config: ClientConfig,
     skip_0_partition: bool,
@@ -131,16 +57,15 @@ pub struct ConsumerOptions<'opts> {
 
 impl TransactionConsumer {
     /// [states_rpc_endpoint] - list of endpoints of states rpcs without /rpc suffix
-    pub async fn new<I, U>(
+    pub async fn new<I>(
         group_id: &str,
         topic: &str,
         states_rpc_endpoints: I,
-        rpc_options: Option<LoadBalancedRpcOptions>,
+        rpc_options: Option<JrpcClientOptions>,
         options: ConsumerOptions<'_>,
     ) -> Result<Arc<Self>>
-    where
-        I: IntoIterator<Item = U>,
-        U: AsRef<str>,
+        where
+            I: IntoIterator<Item=Url>,
     {
         let mut config = ClientConfig::default();
         config
@@ -155,7 +80,7 @@ impl TransactionConsumer {
         }
 
         Ok(Arc::new(Self {
-            states_client: StatesClient::new(states_rpc_endpoints, rpc_options).await?,
+            states_client: JrpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default()).await?,
             topic: topic.to_string(),
             config,
             skip_0_partition: options.skip_0_partition,
@@ -186,7 +111,7 @@ impl TransactionConsumer {
     pub async fn stream_transactions(
         &self,
         from: StreamFrom,
-    ) -> Result<impl Stream<Item = ConsumedTransaction>> {
+    ) -> Result<impl Stream<Item=ConsumedTransaction>> {
         let consumer = self.subscribe(&from)?;
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
@@ -242,7 +167,7 @@ impl TransactionConsumer {
     pub async fn stream_until_highest_offsets(
         &self,
         from: StreamFrom,
-    ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
+    ) -> Result<(impl Stream<Item=ConsumedTransaction>, Offsets)> {
         let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
 
         let (tx, rx) = futures::channel::mpsc::channel(1);
@@ -404,7 +329,7 @@ impl TransactionConsumer {
             .await
     }
 
-    pub fn get_client(&self) -> &StatesClient {
+    pub fn get_client(&self) -> &JrpcClient {
         &self.states_client
     }
 }
@@ -532,27 +457,27 @@ mod test {
             &MsgAddressInt::from_str(
                 "0:8e2586602513e99a55fa2be08561469c7ce51a7d5a25977558e77ef2bc9387b4",
             )
-            .unwrap(),
+                .unwrap(),
         )
-        .await
-        .unwrap()
-        .unwrap();
+            .await
+            .unwrap()
+            .unwrap();
 
         pr.get_contract_state(
             &MsgAddressInt::from_str(
                 "-1:efd5a14409a8a129686114fc092525fddd508f1ea56d1b649a3a695d3a5b188c",
             )
-            .unwrap(),
+                .unwrap(),
         )
-        .await
-        .unwrap()
-        .unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(pr
             .get_contract_state(
                 &MsgAddressInt::from_str(
                     "-1:aaa5a14409a8a129686114fc092525fddd508f1ea56d1b649a3a695d3a5b188c",
                 )
-                .unwrap(),
+                    .unwrap(),
             )
             .await
             .unwrap()
