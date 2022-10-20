@@ -78,13 +78,8 @@ impl TransactionConsumer {
             config.set(k, v);
         }
 
-
-        let endpoints = states_rpc_endpoints
-            .into_iter()
-            .map(|url| url.join("/rpc").unwrap());
-
         Ok(Arc::new(Self {
-            states_client: JrpcClient::new(endpoints, rpc_options.unwrap_or_default()).await?,
+            states_client: JrpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default()).await?,
             topic: topic.to_string(),
             config,
             skip_0_partition: options.skip_0_partition,
@@ -446,13 +441,14 @@ fn get_latest_offsets<X: ConsumerContext, C: Consumer<X>>(
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
-    use everscale_jrpc_client::JrpcClient;
 
     use ton_block::MsgAddressInt;
 
+    use crate::StatesClient;
+
     #[tokio::test]
     async fn test_get() {
-        let pr = JrpcClient::new(["http://35.240.13.113:8081".parse().unwrap()], Default::default())
+        let pr = StatesClient::new(["http://35.240.13.113:8081"], None)
             .await
             .unwrap();
 
