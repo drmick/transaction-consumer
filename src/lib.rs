@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::{Context, Result};
 pub use everscale_jrpc_client::{JrpcClientOptions, JrpcClient};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
-use nekoton::transport::models::{ExistingContract, };
+use nekoton::transport::models::{ExistingContract};
 use rdkafka::topic_partition_list::TopicPartitionListElem;
 use rdkafka::{
     config::FromClientConfig,
@@ -66,6 +66,22 @@ impl TransactionConsumer {
         where
             I: IntoIterator<Item=Url>,
     {
+        let client = JrpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default()).await?;
+        Self::with_jrpc_client(
+            group_id,
+            topic,
+            client,
+            options,
+        )
+            .await
+    }
+
+    pub async fn with_jrpc_client(
+        group_id: &str,
+        topic: &str,
+        states_client: JrpcClient,
+        options: ConsumerOptions<'_>,
+    ) -> Result<Arc<Self>> {
         let mut config = ClientConfig::default();
         config
             .set("group.id", group_id)
@@ -79,7 +95,7 @@ impl TransactionConsumer {
         }
 
         Ok(Arc::new(Self {
-            states_client: JrpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default()).await?,
+            states_client,
             topic: topic.to_string(),
             config,
             skip_0_partition: options.skip_0_partition,

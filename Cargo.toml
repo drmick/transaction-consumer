@@ -1,13 +1,13 @@
 [package]
 edition = "2021"
 name = "transaction-consumer"
-version = "0.14.0"
+version = "0.15.0"
 
 [dependencies]
 anyhow = "1"
 futures = "0.3"
 log = "0.4.14"
-rdkafka = { version = "0.28.0", features = ["gssapi-vendored", "sasl", ] }
+rdkafka = { version = "0.29.0", features = ["gssapi-vendored", "sasl", ] }
 url = "2.2.2"
 tokio = { version = "1.17", features = ["sync", "fs", "rt", "macros"] }
 
@@ -23,4 +23,4 @@ everscale-jrpc-client = { git = "https://github.com/broxus/everscale-jrpc.git" }
 
 [target.'cfg(target_os = "macos")'.dependencies.rdkafka]
 features = ["gssapi-vendored", "sasl"]
-version = "0.28.0"
+version = "0.29.0"
