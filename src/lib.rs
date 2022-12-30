@@ -272,7 +272,7 @@ impl TransactionConsumer {
         }
         println!("try committed_offsets");
 
-        let stored = consumer.committed_offsets(tpl,         rdkafka::util::Timeout::from(Duration::from_secs(10)))?;
+        let stored = consumer.committed_offsets(tpl,         rdkafka::util::Timeout::from(Duration::from_secs(600)))?;
         println!("666");
 
         let stored: Vec<TopicPartitionListElem> = stored.elements_for_topic(&this.topic);
