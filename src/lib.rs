@@ -164,15 +164,15 @@ impl TransactionConsumer {
 
     fn subscribe(&self, stream_from: &StreamFrom) -> Result<Arc<StreamConsumer>> {
         let consumer = StreamConsumer::from_config(&self.config)?;
-        log::debug!("11");
+        println!("11");
         let mut assignment = TopicPartitionList::new();
-        log::debug!("22");
+        println!("22");
 
         let num_partitions = get_topic_partition_count(&consumer, &self.topic)?;
-        log::debug!("num_partitions {num_partitions}");
+        println!("num_partitions {num_partitions}");
 
         let start = if self.skip_0_partition { 1 } else { 0 };
-        log::debug!("start {start}");
+        println!("start {start}");
 
         for x in start..num_partitions {
             assignment.add_partition_offset(
@@ -184,7 +184,7 @@ impl TransactionConsumer {
             )?;
         }
 
-        log::info!("Assigning: {:?}", assignment);
+        println!("Assigning: {:?}", assignment);
         consumer.assign(&assignment)?;
         Ok(Arc::new(consumer))
     }
@@ -193,13 +193,13 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<impl Stream<Item = ConsumedTransaction>> {
-        log::info!("1");
+        println!("1");
         let consumer = self.subscribe(&from)?;
-        log::info!("2");
+        println!("2");
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
-        log::info!("Starting streaming");
+        println!("Starting streaming");
         tokio::spawn(async move {
             let mut decompressor = ZstdWrapper::new();
             let stream = consumer.stream();
@@ -240,7 +240,7 @@ impl TransactionConsumer {
                     consumer.store_offset_from_message(&message),
                     "Failed committing"
                 );
-                log::debug!("Stored offsets");
+                println!("Stored offsets");
             }
         });
 
@@ -251,18 +251,18 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
-        log::debug!("111");
+        println!("111");
         let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
-        log::debug!("222 {:?}", &self.config);
+        println!("222 {:?}", &self.config);
 
         let (tx, rx) = futures::channel::mpsc::channel(1);
-        log::debug!("333");
+        println!("333");
 
         let this = self;
-        log::debug!("444");
+        println!("444");
 
         let highest_offsets = get_latest_offsets(&consumer, &this.topic, self.skip_0_partition)?;
-        log::debug!("{:?}", highest_offsets);
+        println!("{:?}", highest_offsets);
 
         let mut tpl = TopicPartitionList::new();
         for (part, _) in &highest_offsets {
@@ -271,13 +271,13 @@ impl TransactionConsumer {
                 continue;
             }
         }
-        log::debug!("555");
+        println!("555");
 
         let stored = consumer.committed_offsets(tpl, None)?;
-        log::debug!("666");
+        println!("666");
 
         let stored: Vec<TopicPartitionListElem> = stored.elements_for_topic(&this.topic);
-        log::debug!("777");
+        println!("777");
 
         let offsets = Offsets(HashMap::from_iter(
             highest_offsets
@@ -285,7 +285,7 @@ impl TransactionConsumer {
                 .copied()
                 .map(|(k, v)| (k, v.checked_sub(1).unwrap_or(0))),
         ));
-        log::debug!("888");
+        println!("888");
 
         drop(consumer);
         for (part, highest_offset) in offsets.0.iter().map(|(k, v)| (*k, *v)) {
@@ -297,7 +297,7 @@ impl TransactionConsumer {
             } else {
                 None
             };
-            log::debug!("commited_offset {commited_offset:?}");
+            println!("commited_offset {commited_offset:?}");
 
             // check if we have to skip this partition
             if let Some(Offset::Offset(of)) = commited_offset {
@@ -341,15 +341,15 @@ impl TransactionConsumer {
             tpl.add_partition_offset(&this.topic, part, ofset)?;
             consumer.assign(&tpl)?;
 
-            log::debug!("999");
+            println!("999");
             tokio::spawn(async move {
-                log::debug!("1111");
+                println!("1111");
 
                 let stream = consumer.stream();
-                log::debug!("2222");
+                println!("2222");
 
                 tokio::pin!(stream);
-                log::debug!("3333");
+                println!("3333");
 
                 let mut decompressor = ZstdWrapper::new();
 
@@ -384,7 +384,7 @@ impl TransactionConsumer {
 
                     let offset = message.offset();
                     if offset >= highest_offset {
-                        log::info!(
+                        println!(
                             "Received message with higher offset than highest: {} >= {}. Partition: {}",
                             offset,
                             highest_offset,
@@ -404,7 +404,7 @@ impl TransactionConsumer {
                         consumer.store_offset_from_message(&message),
                         "Failed committing"
                     );
-                    log::debug!("Stored offsets");
+                    println!("Stored offsets");
                 }
             });
         }
@@ -526,16 +526,16 @@ fn get_latest_offsets<X: ConsumerContext, C: Consumer<X>>(
     topic_name: &str,
     skip_0_partition: bool,
 ) -> Result<Vec<(i32, i64)>> {
-    log::debug!("555");
+    println!("555");
 
     let topic_partition_count = get_topic_partition_count(consumer, topic_name)?;
-    log::debug!("topic_partition_count {topic_partition_count}");
+    println!("topic_partition_count {topic_partition_count}");
 
     let mut parts_info = Vec::with_capacity(topic_partition_count);
-    log::debug!("parts_info {parts_info:?}");
+    println!("parts_info {parts_info:?}");
 
     let start = if skip_0_partition { 1 } else { 0 };
-    log::debug!("start {start:?}");
+    println!("start {start:?}");
 
     for part in start..topic_partition_count {
         let offset = consumer
