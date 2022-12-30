@@ -253,7 +253,6 @@ impl TransactionConsumer {
     ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
         println!("111");
         let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
-        println!("222 {:?}", &self.config);
 
         let (tx, rx) = futures::channel::mpsc::channel(1);
         println!("333");
@@ -271,7 +270,7 @@ impl TransactionConsumer {
                 continue;
             }
         }
-        println!("555");
+        println!("try committed_offsets");
 
         let stored = consumer.committed_offsets(tpl,         rdkafka::util::Timeout::from(Duration::from_secs(10)))?;
         println!("666");
@@ -526,7 +525,7 @@ fn get_latest_offsets<X: ConsumerContext, C: Consumer<X>>(
     topic_name: &str,
     skip_0_partition: bool,
 ) -> Result<Vec<(i32, i64)>> {
-    println!("555");
+    println!("get_latest_offsets started");
 
     let topic_partition_count = get_topic_partition_count(consumer, topic_name)?;
     println!("topic_partition_count {topic_partition_count}");
