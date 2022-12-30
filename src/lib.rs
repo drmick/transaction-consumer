@@ -251,13 +251,19 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
+        log::debug!("111");
         let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
+        log::debug!("222 {:?}", &self.config);
 
         let (tx, rx) = futures::channel::mpsc::channel(1);
+        log::debug!("333");
 
         let this = self;
+        log::debug!("444");
 
         let highest_offsets = get_latest_offsets(&consumer, &this.topic, self.skip_0_partition)?;
+        log::debug!("{:?}", highest_offsets);
+
         let mut tpl = TopicPartitionList::new();
         for (part, _) in &highest_offsets {
             if let Err(e) = tpl.add_partition_offset(&this.topic, *part as i32, Offset::Stored) {
@@ -265,8 +271,13 @@ impl TransactionConsumer {
                 continue;
             }
         }
+        log::debug!("555");
+
         let stored = consumer.committed_offsets(tpl, None)?;
+        log::debug!("666");
+
         let stored: Vec<TopicPartitionListElem> = stored.elements_for_topic(&this.topic);
+        log::debug!("777");
 
         let offsets = Offsets(HashMap::from_iter(
             highest_offsets
@@ -274,6 +285,7 @@ impl TransactionConsumer {
                 .copied()
                 .map(|(k, v)| (k, v.checked_sub(1).unwrap_or(0))),
         ));
+        log::debug!("888");
 
         drop(consumer);
         for (part, highest_offset) in offsets.0.iter().map(|(k, v)| (*k, *v)) {
@@ -285,6 +297,7 @@ impl TransactionConsumer {
             } else {
                 None
             };
+            log::debug!("commited_offset {commited_offset:?}");
 
             // check if we have to skip this partition
             if let Some(Offset::Offset(of)) = commited_offset {
@@ -328,9 +341,15 @@ impl TransactionConsumer {
             tpl.add_partition_offset(&this.topic, part, ofset)?;
             consumer.assign(&tpl)?;
 
+            log::debug!("999");
             tokio::spawn(async move {
+                log::debug!("1111");
+
                 let stream = consumer.stream();
+                log::debug!("2222");
+
                 tokio::pin!(stream);
+                log::debug!("3333");
 
                 let mut decompressor = ZstdWrapper::new();
 
@@ -507,9 +526,16 @@ fn get_latest_offsets<X: ConsumerContext, C: Consumer<X>>(
     topic_name: &str,
     skip_0_partition: bool,
 ) -> Result<Vec<(i32, i64)>> {
+    log::debug!("555");
+
     let topic_partition_count = get_topic_partition_count(consumer, topic_name)?;
+    log::debug!("topic_partition_count {topic_partition_count}");
+
     let mut parts_info = Vec::with_capacity(topic_partition_count);
+    log::debug!("parts_info {parts_info:?}");
+
     let start = if skip_0_partition { 1 } else { 0 };
+    log::debug!("start {start:?}");
 
     for part in start..topic_partition_count {
         let offset = consumer
