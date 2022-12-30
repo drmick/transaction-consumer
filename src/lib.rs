@@ -164,10 +164,16 @@ impl TransactionConsumer {
 
     fn subscribe(&self, stream_from: &StreamFrom) -> Result<Arc<StreamConsumer>> {
         let consumer = StreamConsumer::from_config(&self.config)?;
+        log::debug!("11");
         let mut assignment = TopicPartitionList::new();
+        log::debug!("22");
 
         let num_partitions = get_topic_partition_count(&consumer, &self.topic)?;
+        log::debug!("num_partitions {num_partitions}");
+
         let start = if self.skip_0_partition { 1 } else { 0 };
+        log::debug!("start {start}");
+
         for x in start..num_partitions {
             assignment.add_partition_offset(
                 &self.topic,
@@ -187,7 +193,9 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<impl Stream<Item = ConsumedTransaction>> {
+        log::info!("1");
         let consumer = self.subscribe(&from)?;
+        log::info!("2");
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
